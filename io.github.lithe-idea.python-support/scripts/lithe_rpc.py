@@ -21,6 +21,7 @@ TOOLCHAINS_VERSION = 0
 
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 MAX_INCOMING_FRAME_BYTES = 16 * 1024 * 1024
+MAX_IN_FLIGHT_REQUESTS = 32
 MAX_FUNCTION_RESULT_BYTES = 1024 * 1024
 MAX_BUILD_RESULT_BYTES = 32 * 1024 * 1024
 MAX_BUILD_MESSAGE_BYTES = 4096
@@ -181,58 +182,11 @@ class FramingError(Exception):
     """Raised when the incoming stdio stream violates Content-Length framing."""
 
 
-def terminate_process_tree(proc: subprocess.Popen[Any]) -> None:
-    """Terminates a child process and its process group with bounded escalation."""
-    if proc.poll() is not None:
-        return
-    if os.name == "nt":
-        try:
-            subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=3.0,
-                check=False,
-            )
-        except Exception:
-            pass
-        try:
-            proc.kill()
-        except OSError:
-            pass
-    else:
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except OSError:
-            try:
-                proc.terminate()
-            except OSError:
-                pass
-        try:
-            proc.wait(timeout=1.5)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-    try:
-        proc.wait(timeout=2.0)
-    except Exception:
-        pass
-
-
 class CancelToken:
-    """Tracks request cancellation and owns every child subprocess started by the request."""
+    """Shares cancellation with a queued or running request."""
 
     def __init__(self) -> None:
         self._event = threading.Event()
-        self._lock = threading.Lock()
-        self._procs: set[subprocess.Popen[Any]] = set()
 
     @property
     def cancelled(self) -> bool:
@@ -245,28 +199,8 @@ class CancelToken:
     def wait(self, timeout: float) -> bool:
         return self._event.wait(timeout)
 
-    def register_process(self, proc: subprocess.Popen[Any]) -> None:
-        kill_now = False
-        with self._lock:
-            if self._event.is_set():
-                kill_now = True
-            else:
-                self._procs.add(proc)
-        if kill_now:
-            terminate_process_tree(proc)
-            raise CancelledError("Request cancelled")
-
-    def unregister_process(self, proc: subprocess.Popen[Any]) -> None:
-        with self._lock:
-            self._procs.discard(proc)
-
     def cancel(self) -> None:
-        with self._lock:
-            self._event.set()
-            procs = list(self._procs)
-            self._procs.clear()
-        for proc in procs:
-            terminate_process_tree(proc)
+        self._event.set()
 
 
 def run_bounded_process(
@@ -285,20 +219,24 @@ def run_bounded_process(
     Returns (exit_code, combined_output, timed_out).
     """
     cancel_token.raise_if_cancelled()
-    popen_kwargs: dict[str, Any] = {
-        "cwd": cwd,
-        "env": env,
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.STDOUT,
-    }
+    job = None
     if os.name == "nt":
-        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    else:
-        popen_kwargs["start_new_session"] = True
+        from windows_job import WindowsJob
 
-    proc = subprocess.Popen(argv, **popen_kwargs)
-    cancel_token.register_process(proc)
+        job = WindowsJob()
+        try:
+            # A Windows virtualenv redirector can create a child before its
+            # interpreter starts. The base executable keeps bootstrap atomic.
+            proc = job.start(sys._base_executable, argv, cwd=cwd, env=env)
+        except Exception:
+            job.close()
+            raise
+    else:
+        proc = subprocess.Popen(
+            argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
     chunks: list[bytes] = []
     captured_bytes = 0
     lock = threading.Lock()
@@ -310,7 +248,7 @@ def run_bounded_process(
             return
         try:
             while True:
-                data = stream.read(4096)
+                data = stream.read1(4096)
                 if not data:
                     break
                 text_chunk: Optional[str] = None
@@ -332,33 +270,42 @@ def run_bounded_process(
                 pass
 
     reader_thread = threading.Thread(target=_reader, daemon=True)
-    reader_thread.start()
-
     deadline = time.monotonic() + max(0.1, timeout_seconds)
     timed_out = False
     try:
+        reader_thread.start()
         while proc.poll() is None:
-            if cancel_token.cancelled:
-                terminate_process_tree(proc)
-                raise CancelledError("Request cancelled")
+            cancel_token.raise_if_cancelled()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
-                terminate_process_tree(proc)
                 break
             try:
                 proc.wait(timeout=min(0.05, remaining))
             except subprocess.TimeoutExpired:
                 continue
-        reader_thread.join(timeout=2.0)
-        cancel_token.raise_if_cancelled()
-        exit_code = proc.returncode if proc.returncode is not None else -1
-        output = b"".join(chunks).decode("utf-8", errors="replace")
-        return exit_code, output, timed_out
     finally:
-        cancel_token.unregister_process(proc)
-        if proc.poll() is None:
-            terminate_process_tree(proc)
+        # The request owns the whole group, even after its direct child exits.
+        # Closing the Windows job or killing the POSIX group releases inherited
+        # output handles left open by surviving descendants before draining.
+        if job is not None:
+            job.close()
+        else:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        proc.wait(timeout=2.0)
+        if reader_thread.ident is None:
+            proc.stdout.close()
+        else:
+            reader_thread.join(timeout=2.0)
+
+    cancel_token.raise_if_cancelled()
+    exit_code = proc.returncode
+    with lock:
+        output = b"".join(chunks).decode("utf-8", errors="replace")
+    return exit_code, output, timed_out
 
 
 class DiagnosticsReporter:
@@ -753,7 +700,7 @@ class JsonRpcServer:
             return
 
         if method == "lithe/function/invoke":
-            self._executor.submit(self._invoke_function, req_id, params)
+            self._submit(req_id, self._invoke_function, params)
             return
         if method in self._build_handlers and self._build_version is not None:
             if method == "lithe/build/runEntrypoints" and self._build_version < 1:
@@ -762,16 +709,39 @@ class JsonRpcServer:
                     error={"code": ERROR_METHOD_NOT_FOUND, "message": "The requested method is not supported."},
                 )
                 return
-            self._executor.submit(self._invoke_build, req_id, method, params)
+            self._submit(req_id, self._invoke_build, method, params)
             return
         if method == "toolchains/query" and self._selected_toolchain_providers:
-            self._executor.submit(self._invoke_toolchain_query, req_id, params)
+            self._submit(req_id, self._invoke_toolchain_query, params)
             return
 
         self._respond(
             req_id,
             error={"code": ERROR_METHOD_NOT_FOUND, "message": "The requested method is not supported."},
         )
+
+    def _submit(self, req_id: Any, invoke: Callable[..., None], *args: Any) -> None:
+        key = request_key(req_id)
+        token = CancelToken()
+        with self._state_lock:
+            admitted = key not in self._incoming and len(self._incoming) < MAX_IN_FLIGHT_REQUESTS
+            if admitted:
+                self._incoming[key] = token
+        if not admitted:
+            self._respond(
+                req_id,
+                error={"code": ERROR_INVALID_REQUEST, "message": "The backend cannot accept this request."},
+            )
+            return
+
+        def run() -> None:
+            try:
+                invoke(req_id, token, *args)
+            finally:
+                with self._state_lock:
+                    self._incoming.pop(key, None)
+
+        self._executor.submit(run)
 
     def _handle_initialize(self, req_id: Any, params: dict[str, Any]) -> None:
         if self._phase != "listening":
@@ -899,7 +869,7 @@ class JsonRpcServer:
                 self.diagnostics.terminal("shutdown", "internal_error", 0)
         self._respond(req_id, result=None)
 
-    def _invoke_function(self, req_id: Any, raw_params: Any) -> None:
+    def _invoke_function(self, req_id: Any, token: CancelToken, raw_params: Any) -> None:
         if not isinstance(raw_params, dict):
             self._respond(req_id, error={"code": ERROR_INVALID_PARAMS, "message": "Function invoke requires object params."})
             return
@@ -945,6 +915,7 @@ class JsonRpcServer:
 
         self._execute_tracked(
             req_id=req_id,
+            token=token,
             operation=fn_id,
             wire_op_id=op_id,
             invoke=lambda ctx: handler(call_params, ctx),
@@ -955,7 +926,7 @@ class JsonRpcServer:
             emit_logging=True,
         )
 
-    def _invoke_build(self, req_id: Any, method: str, raw_params: Any) -> None:
+    def _invoke_build(self, req_id: Any, token: CancelToken, method: str, raw_params: Any) -> None:
         progressing = method in (
             "lithe/build/execute",
             "lithe/build/test",
@@ -1019,6 +990,7 @@ class JsonRpcServer:
 
         self._execute_tracked(
             req_id=req_id,
+            token=token,
             operation=method,
             wire_op_id=op_id,
             invoke=lambda ctx: handler(raw_params, ctx),
@@ -1029,7 +1001,7 @@ class JsonRpcServer:
             emit_logging=True,
         )
 
-    def _invoke_toolchain_query(self, req_id: Any, raw_params: Any) -> None:
+    def _invoke_toolchain_query(self, req_id: Any, token: CancelToken, raw_params: Any) -> None:
         if not isinstance(raw_params, dict):
             self._respond(
                 req_id,
@@ -1063,11 +1035,6 @@ class JsonRpcServer:
             return
 
         handler = self._toolchain_providers[provider_id]
-        key = request_key(req_id)
-        token = CancelToken()
-        with self._state_lock:
-            self._incoming[key] = token
-
         ctx = CallContext(
             cancel_token=token,
             diagnostics=self._make_diagnostics(request_operation_id(op_id, req_id)),
@@ -1075,6 +1042,7 @@ class JsonRpcServer:
             operation_id=op_id,
         )
         try:
+            token.raise_if_cancelled()
             result = handler(raw_params, ctx)
             token.raise_if_cancelled()
             self._respond(req_id, result=result)
@@ -1135,15 +1103,11 @@ class JsonRpcServer:
                         },
                     },
                 )
-        finally:
-            with self._state_lock:
-                self._incoming.pop(key, None)
-            token.cancel()
-
     def _execute_tracked(
         self,
         *,
         req_id: Any,
+        token: CancelToken,
         operation: str,
         wire_op_id: Any,
         invoke: Callable[[CallContext], Any],
@@ -1161,11 +1125,6 @@ class JsonRpcServer:
             nonlocal quiet_call
             quiet_call = True
 
-        token = CancelToken()
-        key = request_key(req_id)
-        with self._state_lock:
-            self._incoming[key] = token
-
         ctx = CallContext(
             cancel_token=token,
             diagnostics=diag,
@@ -1181,9 +1140,10 @@ class JsonRpcServer:
         was_cancelled = False
 
         try:
-            raw_value = invoke(ctx)
             token.raise_if_cancelled()
+            raw_value = invoke(ctx)
             result_val = shape(raw_value)
+            token.raise_if_cancelled()
         except CancelledError:
             was_cancelled = True
             error_obj = {"code": ERROR_REQUEST_CANCELLED, "message": "The request was cancelled."}
@@ -1212,9 +1172,6 @@ class JsonRpcServer:
         finally:
             elapsed_ms = (time.monotonic() - started) * 1000.0
             on_settled()
-            with self._state_lock:
-                self._incoming.pop(key, None)
-            token.cancel()
 
         # Emit terminal lithe/log notification strictly BEFORE the RPC response frame
         # so Core correlates wire operationId with the still-active host operation.

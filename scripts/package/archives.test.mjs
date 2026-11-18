@@ -71,6 +71,7 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
       `${PACKAGE_ID}/THIRD-PARTY-NOTICES.txt`,
       `${PACKAGE_ID}/l10n/zh-Hans.json`,
       `${PACKAGE_ID}/scripts/lithe_rpc.py`,
+      `${PACKAGE_ID}/scripts/windows_job.py`,
       `${PACKAGE_ID}/scripts/backend.py`,
       `${PACKAGE_ID}/scripts/build_model.py`,
       `${PACKAGE_ID}/scripts/build_provider.py`,

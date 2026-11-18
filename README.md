@@ -11,6 +11,7 @@ Python language support plugin for Lithe (`v0.2.0`, `schemaVersion: 0`, `pluginA
 1. **语言与编辑器基础（`languages: python`）**
    - 识别 `.py`、`.pyi`、`.pyw`，配置 `#` 行注释与括号/引号自动配对，声明 `pyproject.toml` / `setup.py` / `setup.cfg` / `requirements.txt` / `Pipfile` / `pyrefly.toml` 项目标记及 `.venv` / `venv` / `.conda` 项目依赖目录。
 2. **后端解析的语言服务器启动与解释器自动注入（`backend` + `languageServers: python` / Pyrefly `1.4.1`）**
+   - 启动语言服务器前，宿主需要能够发现 Python 3.9 或更高版本以执行启动解析后端。宿主会传入可用于自动启动的解释器路径，项目内环境交由 Pyrefly 按自身规则发现。
    - 构建期按平台固定版本与 SHA-256 打包 `pyrefly 1.4.1`（Unix：`bin/pyrefly`，Windows：`bin/pyrefly.exe`），6 个平台发布包共享同一套纯 Python（`python -I -B`）插件后端 `scripts/backend.py`。
    - `languageServers[0]` 采用 `"launch": {"kind": "backend", "function": "pyrefly.resolveLaunch", "timeoutMilliseconds": 30000}`：根据 `platform.os` 动态返回包内 `bin/pyrefly` 或 `bin/pyrefly.exe` 与 `arguments: ["lsp"]`，合并全部即时设置（`typeCheckingMode`、`displayTypeErrors`、`diagnosticMode`、`autoImportCompletions`、`completeFunctionParens`、`importFormat`）。
    - 当宿主在调用参数中传入已选定的非项目内解释器 `tools.python.executable`（如外部 `conda`、`uv`、`pyenv` 或系统环境）时，自动注入 `workspaceConfiguration.python.pythonPath`；当 `tools.python` 缺失（未选定或项目内虚拟环境尚未获信任）时优雅省略 `pythonPath`，保留 `pyrefly` 原生 `.venv` / `pyproject.toml` 自动发现且不阻断启动。
@@ -21,7 +22,7 @@ Python language support plugin for Lithe (`v0.2.0`, `schemaVersion: 0`, `pluginA
    - `python`：通过纯 Python 构建提供者 `scripts/build_provider.py --cache ${workspaceStateDir}`（`python -I -B`，`executesProjectCode: true`，`mayUseNetwork: false`）承载：
      - `lithe/build/model`：复用 `scripts/build_model.py` 纯 `ast` + `tomllib`（Python 3.9–3.10 自动回退内置 `vendor/tomli`）静态提取 `[project.scripts]`、包 `__main__.py`、顶层 `__main__` 脚本、Django `manage.py`、FastAPI ASGI、Flask WSGI 运行目标（绝不执行用户代码），派生 7 类声明式 `run` 配置；
      - `lithe/build/discoverTests`：运行有界、可随 `$/cancelRequest` 整组终止的 `pytest --collect-only` 收集函数、类方法与 `@pytest.mark.parametrize` 参数化用例（缓存写入 `${workspaceStateDir}`，不向工作区写 `.pytest_cache`），返回标准 `litheTestDiscovery` v0；
-     - `lithe/build/test`：支持从动态测试树精确 nodeid 或 JUnit XML 类名运行单个用例/套件，实时推送 `lithe/build/progress` 并产出 `.pytest_cache/lithe-junit.xml` 供 Core `junitXml` 解码；
+     - `lithe/build/test`：支持从动态测试树精确 nodeid 或 JUnit XML 类名运行单个用例和套件，实时推送 `lithe/build/progress` 并产出 `.pytest_cache/lithe-junit.xml` 供 Core `junitXml` 解码。构建请求在排队时即可取消，执行进程的所有权随请求结束。macOS 和 Linux 使用 POSIX 进程组，Windows 使用 Job Object。
      - `lithe/build/runEntrypoints`：协商 `litheBuild` 1 时按文件静态识别入口并抑制高频成功日志；
      - 同时保留声明式任务 `pip install -r requirements.txt` 与 `mypy`（带诊断 `lineMatcher`）。
    - `uv`（`uv.lock`）：`uv sync`、`uv lock`。

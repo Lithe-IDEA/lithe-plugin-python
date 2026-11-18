@@ -1597,6 +1597,10 @@ try {
     }
   });
 
+  await check("RPC cancellation covers queued requests and child process tree ownership", () => {
+    run(pythonCmd, ["-I", "-B", join(ROOT, "scripts", "test-rpc.py"), join(unpackedPluginDir, "scripts")]);
+  });
+
   await check("lineMatcher and outputLinkMatchers match mypy, Ruff, and Python Traceback output", () => {
     const pyBuild = pluginManifest.buildSystems.find((b) => b.id === "python");
     const mypyPattern = pyBuild.diagnostics.patterns[0];
