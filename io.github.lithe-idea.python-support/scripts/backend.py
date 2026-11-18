@@ -35,7 +35,7 @@ def _bool_setting(settings: dict[str, Any], key: str, default: bool) -> bool:
 
 
 def create_backend_server(*, state_dir: Optional[str] = None) -> JsonRpcServer:
-    server = JsonRpcServer(name="python-support-backend", version="0.1.2")
+    server = JsonRpcServer(name="python-support-backend", version="0.2.0")
     degraded_workspaces: set[str] = set()
     degraded_lock = threading.Lock()
 

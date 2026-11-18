@@ -1,6 +1,6 @@
 # Python Support for Lithe (`io.github.lithe-idea.python-support`)
 
-Python language support plugin for Lithe (`v0.1.2`, `schemaVersion: 0`, `pluginAPIVersion: 0`), bundling [Pyrefly](https://github.com/facebook/pyrefly) `1.4.1` for fast static type checking and LSP navigation, [debugpy](https://github.com/microsoft/debugpy) `1.8.22` for source-level debugging, and a zero-compilation pure-Python (`python -I -B`) plugin backend and build provider.
+Python language support plugin for Lithe (`v0.2.0`, `schemaVersion: 0`, `pluginAPIVersion: 0`), bundling [Pyrefly](https://github.com/facebook/pyrefly) `1.4.1` for fast static type checking and LSP navigation, [debugpy](https://github.com/microsoft/debugpy) `1.8.22` for source-level debugging, and a zero-compilation pure-Python (`python -I -B`) plugin backend and build provider.
 
 遵循 Lithe 插件契约 v1（`schemaVersion: 0`），为 Lithe 桌面端（macOS / Windows / Linux）提供开箱即用的 Python 语言支持、宿主工具链驱动的 `Pyrefly` 解释器注入、`.venv` / `.conda` / `conda` / `uv` / `pyenv` 多来源环境发现、动态 `pytest` 测试树收集与执行、`uv` / `conda` / `Ruff` 构建任务、源码级断点调试及新建项目向导。跨平台实现与验证记录详见 [docs/feature-matrix.md](docs/feature-matrix.md)。
 
@@ -16,7 +16,7 @@ Python language support plugin for Lithe (`v0.1.2`, `schemaVersion: 0`, `pluginA
    - 当宿主在调用参数中传入已选定的非项目内解释器 `tools.python.executable`（如外部 `conda`、`uv`、`pyenv` 或系统环境）时，自动注入 `workspaceConfiguration.python.pythonPath`；当 `tools.python` 缺失（未选定或项目内虚拟环境尚未获信任）时优雅省略 `pythonPath`，保留 `pyrefly` 原生 `.venv` / `pyproject.toml` 自动发现且不阻断启动。
 3. **工具链与多环境发现增强（`toolDefinitions: python` + `toolchain_provider.py`）**
    - 严格按 Core 4 层优先级解析：项目级显式绑定 → 项目内环境（`.venv` / `venv` / `.conda`，`projectKind: "environment"`，受宿主工作区信任门控并保留字面软链路径）→ 全局设置 → `VIRTUAL_ENV` 与 `PATH`（`python3` / `python`）→ 16 条跨平台自动发现规则（覆盖 `UV_PYTHON_INSTALL_DIR`、`XDG_DATA_HOME`、`PYENV_ROOT`、`CONDA_ENVS_PATH`、`CONDA_PREFIX`、`WORKON_HOME`、`LOCALAPPDATA`、`APPDATA`、Homebrew、macOS Framework、`~/.pyenv`、`~/.local/share/uv`、`*conda*/envs/*`、`miniforge*/envs/*`）。
-   - `scripts/toolchain_provider.py` 完整实现 `litheToolchains`（`toolchains/query`）协议（支持 `~/.conda/environments.txt`、`CONDA_ENVS_PATH`、`UV_PYTHON_INSTALL_DIR`、`PYENV_ROOT`、Poetry 与 Pipenv 外部虚拟环境、`.python-version` 与 `pyproject.toml` `requires-python`）。因当前桌面宿主 `pluginhost.Declared()` 尚未开放 `toolchainProviders`，`plugin.json` 暂不声明 `requires.toolchainProviders: 0` 以确保当前宿主 100% 可安装通过；当宿主握手提供 `experimental.litheToolchains` 时，`backend.py` 自动启用响应。
+   - `scripts/toolchain_provider.py` 完整实现 `litheToolchains`（`toolchains/query`）协议（支持 `~/.conda/environments.txt`、`CONDA_ENVS_PATH`、`UV_PYTHON_INSTALL_DIR`、`PYENV_ROOT`、Poetry 与 Pipenv 外部虚拟环境、`.python-version` 与 `pyproject.toml` `requires-python`）。当前桌面宿主通过清单中的 `toolDefinitions` 发现已安装解释器。提供者协议可独立验证，在桌面端启用还需要宿主支持 `toolchainProviders`、清单声明以及满足 Core 自举契约的打包运行时。
 4. **4 个独立构建系统与动态 `pytest` 测试树（`buildSystems` & `buildProviders`）**
    - `python`：通过纯 Python 构建提供者 `scripts/build_provider.py --cache ${workspaceStateDir}`（`python -I -B`，`executesProjectCode: true`，`mayUseNetwork: false`）承载：
      - `lithe/build/model`：复用 `scripts/build_model.py` 纯 `ast` + `tomllib`（Python 3.9–3.10 自动回退内置 `vendor/tomli`）静态提取 `[project.scripts]`、包 `__main__.py`、顶层 `__main__` 脚本、Django `manage.py`、FastAPI ASGI、Flask WSGI 运行目标（绝不执行用户代码），派生 7 类声明式 `run` 配置；
@@ -36,23 +36,23 @@ Python language support plugin for Lithe (`v0.1.2`, `schemaVersion: 0`, `pluginA
 
 ## 日志接线说明（Structured Logging v2 Wiring）
 
-本插件 `0.1.2` 包含纯 Python 插件后端（`scripts/backend.py`）、构建提供者（`scripts/build_provider.py`）与声明式贡献，全部诊断严格遵循 Lithe 结构化日志 v2 规范（Core `rust/logging/README.md`、`shared/plugins/contract/v1/README.md#structured-plugin-diagnostics` 与 `shared/plugins/guides/plugin-logging.md`），**零自建插件日志文件**，已安装插件目录在运行期保持 **100% 只读**。
+本插件 `0.2.0` 包含纯 Python 插件后端（`scripts/backend.py`）、构建提供者（`scripts/build_provider.py`）与声明式贡献，全部诊断严格遵循 Lithe 结构化日志 v2 规范（Core `rust/logging/README.md`、`shared/plugins/contract/v1/README.md#structured-plugin-diagnostics` 与 `shared/plugins/guides/plugin-logging.md`），**零自建插件日志文件**，已安装插件目录在运行期保持 **100% 只读**。
 
-### 1. 后端与构建 Provider 协议接线（通道：`plugins/io.github.lithe-idea.python-support/backend`）
+### 1. 后端与构建 Provider 协议接线（统一通道：`plugins/io.github.lithe-idea.python-support/host`）
 
-`scripts/lithe_rpc.py` 实现 stdio JSON-RPC 2.0 协议帧传输：
+`scripts/lithe_rpc.py` 实现 stdio JSON-RPC 2.0 协议帧传输，与宿主代记的声明式贡献共用同一个结构化日志通道 `plugins/io.github.lithe-idea.python-support/host`（见 Core `rust/logging/events/plugins.json`）：
 - **强制协商 `litheLogging` 0**：`initialize` 缺少 `experimental.litheLogging` `versions: [0]` 时立即以 `-32600` 拒绝握手；握手成功后将 Python 层 `sys.stdout` 重定向到 `sys.stderr`，确保 `stdout` 仅输出合法 `Content-Length` JSON-RPC 帧。
 - **请求级 `operationId` 关联与时序**：所有 `lithe/log` 通知严格在对应 JSON-RPC 响应帧发出**之前**写入 `stdout`，携带宿主请求传入的 `operationID`（回退为受控请求 ID），确保 Core 将诊断精确关联到活跃操作。
 - **取消不记失败**：收到 `$/cancelRequest` 时立即终止关联子进程组（POSIX `os.killpg` / Windows `taskkill /T /F`），返回 `-32800` 且**不发送** `operationFinished` 或 `operationFailed`。
 
 | `operation` | 所属进程 | 成功事件与级别 | 降级 / 恢复事件（`WARN`） | 失败事件与级别（`ERROR`） | 受控 `code` 类别标识 |
 | --- | --- | --- | --- | --- | --- |
-| `initialize` | `backend.py` / `build_provider.py` | 握手由 Core 记录 `lsp.protocol.initialized`（`INFO`） | `plugins.operation.fallback_selected`（`code: "functions_unavailable"`，当宿主未协商 `litheFunctions` 时） | 握手失败由 Core / 宿主记录 | `functions_unavailable` |
+| `initialize` | `backend.py` / `build_provider.py` | 握手由 Core 记录 `plugins.host.protocol.initialized`（`INFO`） | `plugins.operation.fallback_selected`（`code: "functions_unavailable"`，当宿主未协商 `litheFunctions` 时） | 握手失败由 Core / 宿主记录 | `functions_unavailable` |
 | `pyrefly.resolveLaunch` | `backend.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "invalid_tool_hint"`，`count: 1`）<br>恢复：`plugins.operation.recovery_finished`（`code: "tool_hint_restored"`，`count: 1`） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `invalid_tool_hint`、`tool_hint_restored`、`python.unknownServer`、`internal_error` |
 | `python.inspectEnvironment` | `backend.py` | **已启用 `suppressSuccessDiagnostics`**（高频只读查询成功不发 `INFO`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidExecutable`、`internal_error` |
 | `lithe/build/model` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "pyproject_parse_failed"`，`count: 1`）<br>恢复：`plugins.operation.recovery_finished`（`code: "pyproject_restored"`，`count: 1`） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `pyproject_parse_failed`、`pyproject_restored`、`python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
 | `lithe/build/discoverTests` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "test_discovery_truncated"`，`count` 为超出 10,000 上限被截断的条目数） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `test_discovery_truncated`、`python.pytestUnavailable`、`python.pytestTimedOut`、`python.pytestCollectionFailed`、`python.interpreterUnavailable`、`python.cacheUnavailable` |
-| `lithe/build/test` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`；测试断言失败仍属正常协议返回 `exitCode != 0`，进程级超时或解释器缺失才记 `ERROR`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.pytestTimedOut`、`python.interpreterUnavailable`、`python.projectUnavailable`、`internal_error` |
+| `lithe/build/test` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`；测试断言失败仍属正常协议返回 `exitCode != 0`，失效/越界选择器、进程级超时或解释器缺失才记 `ERROR`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidTestSelector`、`python.staleTestSelector`、`python.pytestTimedOut`、`python.interpreterUnavailable`、`python.projectUnavailable`、`internal_error` |
 | `lithe/build/runEntrypoints` | `build_provider.py` | **已启用 `suppressSuccessDiagnostics`**（打开文件高频静态入口探测成功不发 `INFO`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
 | `notification` / `result-encoding` / `shutdown` | `lithe_rpc.py` | — | — | `plugins.operation.failed`（`ERROR`） | `framing_error`、`result_encoding_failed`、`internal_error` |
 
@@ -71,8 +71,8 @@ Python language support plugin for Lithe (`v0.1.2`, `schemaVersion: 0`, `pluginA
 
 | 组件 / 命令 | v2 结构化通道或原生文件位置 | 级别、限流、脱敏与清理策略 |
 | --- | --- | --- |
-| `backend.py` / `build_provider.py`（纯 Python 后端与构建 Provider） | 结构化通道：`plugins/io.github.lithe-idea.python-support/backend`<br>未分类 `stderr`：`lsp.stderr.received`（`DEBUG`） | **零自建日志文件**；未预期异常在 `stderr` 仅输出 `<server-name>: <category> (<ExceptionType>)` 受控短词，**绝不拼接文件路径、命令参数、源码片段、输出内容或环境变量值**。Core 对 `stderr` 按每行 4 KiB、200 行/秒限流并经 1 KiB 脱敏截断，仅在详细诊断开启时落盘。 |
-| `pyrefly lsp`（语言服务器） | 结构化通道：`lsp/python` | Core 记录 `lsp.process.started`、`lsp.protocol.initialized`、`lsp.session.updated`；`window/logMessage` 与 `window/showMessage` 保留显式 `ERROR`/`WARN`/`INFO`/`DEBUG` 级别；未分类 `stderr` 记为 `DEBUG`（仅详细诊断开启时落盘）；详细诊断开启（15 分钟单次到期）时仅接纳 `$/logTrace.message` 摘要，拒绝 `verbose` 载荷。`pyrefly` 不写任何插件内文件。 |
+| `backend.py` / `build_provider.py`（纯 Python 后端与构建 Provider） | 结构化通道：`plugins/io.github.lithe-idea.python-support/host`<br>未分类 `stderr`：`plugins.host.stderr.received`（`DEBUG`） | **零自建日志文件**；会话启动与握手由 Core 记录 `plugins.host.process.started` / `plugins.host.protocol.initialized` / `plugins.host.session.updated`；未预期异常在 `stderr` 仅输出 `<server-name>: <category> (<ExceptionType>)` 受控短词，**绝不拼接文件路径、命令参数、源码片段、输出内容或环境变量值**。Core 对 `stderr` 按每行 4 KiB 限流并脱敏截断，仅在详细诊断开启时落盘。 |
+| `pyrefly lsp`（语言服务器） | 结构化通道：`plugins/io.github.lithe-idea.python-support/host`（或宿主内置 `lsp/python`） | Core 记录 `plugins.host.process.started`、`plugins.host.protocol.initialized`、`plugins.host.session.updated`；`window/logMessage` 与 `window/showMessage` 保留显式 `ERROR`/`WARN`/`INFO`/`DEBUG` 级别；未分类 `stderr` 经 `plugins.host.stderr.received` 记为 `DEBUG`（仅详细诊断开启时落盘）；详细诊断开启（15 分钟单次到期）时仅接纳 `$/logTrace.message` 摘要，拒绝 `verbose` 载荷。`pyrefly` 不写任何插件内文件。 |
 | `debugpy`（调试适配器与启动器） | 结构化通道：`debug/debugpy`<br>原生日志文件：`sessions/<session>/plugins/io.github.lithe-idea.python-support/files/debugpy.*.log` | 结构化会话事件写入 `debug/debugpy`；上游 `debugpy` 原生日志通过 `--log-dir ${logDir}` 定向写入宿主 `Store.PluginFilesDirectory` 创建的当前会话专属目录（权限 `0700`，逐段校验拒绝软链越界，绝不写插件安装目录或 app bundle），按 `<pid>` 建文件并随宿主日志会话生命周期统一保留与清理。 |
 | `pytest`、构建任务与项目生成 | 构建/测试面板流式输出（`lithe/build/progress`）与 JUnit XML（`.pytest_cache/lithe-junit.xml`） | `lithe/build/discoverTests` 将 `pytest` 缓存重定向至 `${workspaceStateDir}`；进程 `stdout`、用户测试代码与环境变量值仅进入协议进度流或报告文件，绝不进入 v2 结构化诊断日志。 |
 

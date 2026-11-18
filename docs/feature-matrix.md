@@ -1,11 +1,11 @@
 # Python Support 功能矩阵（Feature Matrix）
 
-本文档维护 `io.github.lithe-idea.python-support`（`v0.1.2`）插件在 6 个目标发布平台上的实现与真实执行验证状态（插件功能矩阵与测试证据仅在本插件仓库维护，不进入宿主仓库）。
+本文档维护 `io.github.lithe-idea.python-support`（`v0.2.0`）插件在 6 个目标发布平台上的实现与真实执行验证状态（插件功能矩阵与测试证据仅在本插件仓库维护，不进入宿主仓库）。
 
 ## 状态定义
 
 - `✅ 已验证`：已在目标平台实机完成打包安装、真实上游二进制/运行时进程执行及宿主端到端测试验证。
-- `⏳ 待实机验证（pending）`：已在 `plugin.json`、脚本与对应平台归档（`dist/python-support-0.1.2-<platform>.zip`）中完成实现，并通过归档路径/大小写安全检查、Lithe Store 规则校验以及 Unix/Windows 双清单真实 Core `ValidatePluginManifest` 契约校验；但尚未在对应 OS/架构实机或 CI runner 上执行原生子进程工作流，严禁在未实跑前标为已验证。
+- `⏳ 待实机验证（pending）`：已在 `plugin.json`、脚本与对应平台归档（`dist/python-support-0.2.0-<platform>.zip`）中完成实现，并通过归档路径/大小写安全检查、Lithe Store 规则校验以及 Unix/Windows 双清单真实 Core `ValidatePluginManifest` 契约校验；但尚未在对应 OS/架构实机或 CI runner 上执行原生子进程工作流，严禁在未实跑前标为已验证。
 - `🚧 待宿主开放（blocked on host capability）`：插件端协议与代码已完整实现并通过真实 Core 解码验证，待桌面宿主开放对应能力版本后启用清单声明。
 
 ## 跨平台能力与验证矩阵
@@ -28,4 +28,4 @@
 
 1. **桌面宿主能力门禁**：`Lithe-core-rust` 已支持 `toolchainProviders: 0`（`litheToolchains` 的 `toolchains/query` 与 `toolchains.decodeReply`），但当前桌面宿主 `desktop/internal/pluginhost/pluginhost.go` 的 `Declared()` 尚未声明 `toolchainProviders`。若在 `plugin.json` 中直接写入 `"requires": {"toolchainProviders": 0}`，当前桌面宿主安装校验会拒绝安装整个插件。
 2. **自举约束**：Core 清单校验（`validate_packaged_provider_backend`）要求声明 `toolchainProviders` 的插件后端必须使用包内可执行文件（`packaged`）或包内自带运行时（`packagedRuntime`）自举，不能依赖所要发现的外部 `tool: "python"` 启动。
-3. **当前落地方案**：本版本在 `plugin.json` 的 `toolDefinitions[0]` 中补齐契约允许的全部 16 条声明式环境发现根与 `.conda` 项目环境以保证当前桌面宿主 **100% 可安装通过**；同时在 `scripts/toolchain_provider.py` 与 `scripts/backend.py` 中完整实现并注册 `litheToolchains`（`providerID: "python"`），当宿主在 `initialize` 握手中提供 `experimental.litheToolchains` 时自动协商响应，绝不使用任何私有字段绕过契约。
+3. **当前落地方案**：桌面宿主通过 `toolDefinitions` 中的 16 条声明式规则和新增的 `.conda` 项目环境候选发现解释器。独立协议测试协商 `experimental.litheToolchains` 并验证 `toolchains/query` 响应。正式接线仍需桌面宿主开放能力、清单声明及打包后端自举，当前安装包通过固定宿主校验。

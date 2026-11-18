@@ -76,8 +76,14 @@ class _LitheTestCollector:
                 try:
                     resolved_suite = (root_real / fpart).resolve().relative_to(cwd_real).as_posix()
                 except Exception:
-                    resolved_suite = fpart.replace("\\\\", "/").lstrip("./")
-            if resolved_suite and cpart:
+                    resolved_suite = None
+            if (
+                resolved_suite
+                and cpart
+                and not resolved_suite.startswith("-")
+                and not cpart.startswith("-")
+                and all(seg not in ("", ".", "..") and not seg.startswith("-") for seg in resolved_suite.split("/"))
+            ):
                 collected.append({"suite": resolved_suite, "case": cpart})
 
 args = [
@@ -118,18 +124,63 @@ def file_uri_to_path(uri: str) -> Optional[Path]:
     return Path(raw_path) if raw_path else None
 
 
+def _strip_dot_slash_prefix(text: str) -> str:
+    while text.startswith("./"):
+        text = text[2:]
+    return text
+
+
 def _normalize_rel_root(raw_root: Any) -> str:
     if raw_root is None or raw_root in ("", "."):
         return "."
     if not isinstance(raw_root, str) or any(ord(c) < 32 or ord(c) == 127 for c in raw_root):
         raise PluginError("python.invalidRoot", "Invalid build instance root.")
-    cleaned = raw_root.replace("\\", "/").strip("/")
+    cleaned = _strip_dot_slash_prefix(raw_root.replace("\\", "/"))
+    cleaned = cleaned.strip("/")
     if not cleaned:
         return "."
     parts = cleaned.split("/")
     if any(p in ("", ".", "..") for p in parts):
         raise PluginError("python.invalidRoot", "Build instance root escapes workspace.")
     return "/".join(parts)
+
+
+def _validate_safe_rel_selector_path(raw: Any, *, allow_dot: bool = False) -> str:
+    if not isinstance(raw, str) or any(ord(c) < 32 or ord(c) == 127 for c in raw):
+        raise PluginError("python.invalidTestSelector", "The requested test selector path is invalid.")
+    slashed = raw.replace("\\", "/")
+    if slashed.startswith("/") or ":" in slashed:
+        raise PluginError("python.invalidTestSelector", "The requested test selector must be a relative path.")
+    cleaned = _strip_dot_slash_prefix(slashed).rstrip("/")
+    if allow_dot and cleaned in ("", "."):
+        return "."
+    if not cleaned or cleaned.startswith("-"):
+        raise PluginError("python.invalidTestSelector", "The requested test selector path is invalid.")
+    parts = cleaned.split("/")
+    if any(p in ("", ".", "..") or p.startswith("-") for p in parts):
+        raise PluginError("python.invalidTestSelector", "The requested test selector path is invalid.")
+    return "/".join(parts)
+
+
+def _verify_contained_path(instance_dir: Path, instance_real: Path, rel_posix: str, *, expect_dir: bool) -> Path:
+    """
+    Verifies every segment from `instance_dir` to `rel_posix` stays strictly within `instance_real`
+    (rejecting symlinks that escape the instance) and distinguishes boundary violations from missing/stale files.
+    """
+    cur = instance_dir
+    for part in rel_posix.split("/"):
+        cur = cur / part
+        if cur.is_symlink() and not _safe_within(instance_real, cur):
+            raise PluginError("python.invalidTestSelector", "The requested test selector escapes the project root.")
+    if cur.exists() and not _safe_within(instance_real, cur):
+        raise PluginError("python.invalidTestSelector", "The requested test selector escapes the project root.")
+    if expect_dir:
+        if not cur.is_dir():
+            raise PluginError("python.staleTestSelector", "The requested test target directory no longer exists.")
+    else:
+        if not cur.is_file():
+            raise PluginError("python.staleTestSelector", "The requested test suite file no longer exists.")
+    return cur
 
 
 def _project_name_for_dir(instance_dir: Path) -> str:
@@ -147,63 +198,79 @@ def _project_name_for_dir(instance_dir: Path) -> str:
 
 def _resolve_pytest_selector_args(
     instance_dir: Path,
-    suite: Optional[str],
-    case: Optional[str],
+    suite: Any,
+    case: Any,
     target: Optional[dict[str, Any]],
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """
-    Maps (suite, case, target) into exact pytest CLI selectors:
-    - Native discovered nodeid parts (`suite="tests/test_a.py"`, `case="TestX::test_y[1]"`)
-      become exact `tests/test_a.py::TestX::test_y[1]`.
-    - JUnit XML classname suites (`suite="tests.test_a.TestX"`, `case="test_y"`) resolve to
-      `tests/test_a.py::TestX::test_y` when the file exists on disk.
+    Validates and maps (suite, case, target) into `(filter_flags, positional_targets)`:
+    - Never widens an unresolvable or stale `suite` to `-k`; rejects with controlled `PluginError`.
+    - Enforces strict workspace containment (`_safe_within`) on every resolved file/directory.
+    - Separates option flags (`-k`) from positional selectors (passed after `--`).
     """
     instance_real = instance_dir.resolve()
 
-    def _resolve_dotted_suite(dotted: str) -> Optional[str]:
-        if "/" in dotted or "\\" in dotted or dotted.endswith((".py", ".pyi", ".pyw")):
-            norm = dotted.replace("\\", "/").lstrip("./")
-            cand = instance_dir / Path(*norm.split("/"))
-            if cand.exists() and _safe_within(instance_real, cand):
-                return norm
-            return norm if dotted.endswith((".py", ".pyi", ".pyw")) else None
+    clean_case: Optional[str] = None
+    if case is not None:
+        if (
+            not isinstance(case, str)
+            or not case.strip()
+            or len(case) > 1024
+            or any(ord(c) < 32 or ord(c) == 127 for c in case)
+            or case.lstrip().startswith("-")
+        ):
+            raise PluginError("python.invalidTestSelector", "The requested test case selector is invalid.")
+        clean_case = case
 
-        parts = [p for p in dotted.split(".") if p]
+    if suite is not None:
+        if (
+            not isinstance(suite, str)
+            or not suite.strip()
+            or len(suite) > 1024
+            or any(ord(c) < 32 or ord(c) == 127 for c in suite)
+            or suite.lstrip().startswith("-")
+        ):
+            raise PluginError("python.invalidTestSelector", "The requested test suite selector is invalid.")
+
+        if "/" in suite or "\\" in suite or suite.endswith((".py", ".pyi", ".pyw")):
+            norm_suite = _validate_safe_rel_selector_path(suite, allow_dot=False)
+            _verify_contained_path(instance_dir, instance_real, norm_suite, expect_dir=False)
+            nodeid = f"{norm_suite}::{clean_case}" if clean_case else norm_suite
+            return [], [nodeid]
+
+        # Dotted JUnit XML classname suite (e.g. "tests.test_calc.TestCalc" or "tests.test_calc").
+        parts = suite.split(".")
+        if not parts or any(not p or p in (".", "..") or p.startswith("-") or "/" in p or "\\" in p for p in parts):
+            raise PluginError("python.invalidTestSelector", "The requested test suite selector is invalid.")
+
         for idx in range(len(parts), 0, -1):
             mod_rel = "/".join(parts[:idx]) + ".py"
             cand = instance_dir / Path(*parts[:idx]).with_suffix(".py")
-            if cand.is_file() and _safe_within(instance_real, cand):
+            if cand.exists() or cand.is_symlink():
+                _verify_contained_path(instance_dir, instance_real, mod_rel, expect_dir=False)
                 rem = parts[idx:]
-                return f"{mod_rel}::{'::'.join(rem)}" if rem else mod_rel
-        return None
+                resolved_base = f"{mod_rel}::{'::'.join(rem)}" if rem else mod_rel
+                nodeid = f"{resolved_base}::{clean_case}" if clean_case else resolved_base
+                return [], [nodeid]
 
-    if suite and case:
-        resolved = _resolve_dotted_suite(suite)
-        if resolved is not None:
-            return [f"{resolved}::{case}"]
-        return ["-k", f"{suite} and {case}"]
-
-    if suite:
-        resolved = _resolve_dotted_suite(suite)
-        if resolved is not None:
-            return [resolved]
-        return ["-k", suite]
+        raise PluginError("python.staleTestSelector", "The requested test suite could not be resolved in the project.")
 
     target_dir: Optional[str] = None
     if isinstance(target, dict):
         props = target.get("properties")
-        if isinstance(props, dict) and isinstance(props.get("directory"), str) and props["directory"].strip():
-            target_dir = props["directory"].strip()
+        if isinstance(props, dict) and "directory" in props and props["directory"] is not None:
+            norm_target = _validate_safe_rel_selector_path(props["directory"], allow_dot=True)
+            if norm_target != ".":
+                _verify_contained_path(instance_dir, instance_real, norm_target, expect_dir=True)
+                target_dir = norm_target
 
-    if case:
-        return [target_dir, "-k", case] if target_dir else ["-k", case]
-    if target_dir:
-        return [target_dir]
-    return []
+    filter_flags = ["-k", clean_case] if clean_case else []
+    positional = [target_dir] if target_dir else []
+    return filter_flags, positional
 
 
 def create_build_provider_server(*, cache_dir: Optional[str] = None) -> JsonRpcServer:
-    server = JsonRpcServer(name="python-build-provider", version="0.1.2")
+    server = JsonRpcServer(name="python-build-provider", version="0.2.0")
     workspace_root_holder: dict[str, Path] = {"root": Path.cwd().resolve()}
     owned_temp_dir: Optional[str] = None
     if cache_dir:
@@ -387,6 +454,8 @@ def create_build_provider_server(*, cache_dir: Optional[str] = None) -> JsonRpcS
                 or not isinstance(case, str)
                 or not suite.strip()
                 or not case.strip()
+                or suite.startswith("-")
+                or case.startswith("-")
                 or len(suite) > 1024
                 or len(case) > 1024
                 or any(ord(c) < 32 or ord(c) == 127 for c in suite)
@@ -421,8 +490,20 @@ def create_build_provider_server(*, cache_dir: Optional[str] = None) -> JsonRpcS
             proj_rel = _normalize_rel_root(project_param["path"])
             ws_root = workspace_root_holder["root"]
             cand_dir = ws_root if proj_rel == "." else (ws_root / Path(*proj_rel.split("/")))
-            if cand_dir.is_dir() and _safe_within(ws_root, cand_dir):
-                run_cwd = cand_dir.resolve()
+            if not _safe_within(instance_dir, cand_dir):
+                raise PluginError("python.invalidTestSelector", "The requested test project escapes the build instance.")
+            if not cand_dir.is_dir():
+                raise PluginError("python.staleTestSelector", "The requested test project no longer exists.")
+            run_cwd = cand_dir.resolve()
+
+        raw_suite = params["suite"] if "suite" in params else None
+        raw_case = params["case"] if "case" in params else None
+        target = params.get("target") if isinstance(params.get("target"), dict) else None
+        option_args = _string_args(params.get("optionArguments"))
+        user_args = _string_args(params.get("userArguments"))
+
+        # Validate selectors BEFORE touching disk or spawning pytest so stale/invalid selectors reject cleanly.
+        filter_flags, positional_targets = _resolve_pytest_selector_args(run_cwd, raw_suite, raw_case, target)
 
         junit_file = run_cwd / Path(*_JUNIT_REPORT_REL.split("/"))
         try:
@@ -432,22 +513,16 @@ def create_build_provider_server(*, cache_dir: Optional[str] = None) -> JsonRpcS
         except OSError:
             pass
 
-        suite = params.get("suite") if isinstance(params.get("suite"), str) else None
-        case = params.get("case") if isinstance(params.get("case"), str) else None
-        target = params.get("target") if isinstance(params.get("target"), dict) else None
-        option_args = _string_args(params.get("optionArguments"))
-        user_args = _string_args(params.get("userArguments"))
-
-        selector_args = _resolve_pytest_selector_args(run_cwd, suite, case, target)
         argv = [
             python_exec,
             "-B",
             "-m",
             "pytest",
             f"--junitxml={_JUNIT_REPORT_REL}",
-            *selector_args,
+            *filter_flags,
             *option_args,
             *user_args,
+            *(["--", *positional_targets] if positional_targets else []),
         ]
 
         timeout_ms = 600_000.0
@@ -476,6 +551,10 @@ def create_build_provider_server(*, cache_dir: Optional[str] = None) -> JsonRpcS
 
         if timed_out:
             raise PluginError("python.pytestTimedOut", "pytest execution timed out.")
+        # pytest returns usage error (4) for missing node IDs and no tests (5) for
+        # unmatched filters. With a selection, neither fulfills the requested run.
+        if (raw_suite is not None or raw_case is not None) and exit_code in (4, 5):
+            raise PluginError("python.staleTestSelector", "pytest could not run the requested test selection.")
 
         return {
             "exitCode": exit_code,
@@ -488,7 +567,10 @@ def create_build_provider_server(*, cache_dir: Optional[str] = None) -> JsonRpcS
         raw_file = params.get("file")
         if not isinstance(raw_file, str) or not raw_file.strip():
             return {"format": "litheRunEntrypoints", "version": 0, "entrypoints": []}
-        clean_file = raw_file.replace("\\", "/").strip("/")
+        slashed = raw_file.replace("\\", "/")
+        if slashed.startswith("/") or ":" in slashed:
+            return {"format": "litheRunEntrypoints", "version": 0, "entrypoints": []}
+        clean_file = _strip_dot_slash_prefix(slashed).rstrip("/")
         if norm_root != ".":
             prefix = norm_root + "/"
             if not clean_file.startswith(prefix):
@@ -496,6 +578,8 @@ def create_build_provider_server(*, cache_dir: Optional[str] = None) -> JsonRpcS
             rel_file = clean_file[len(prefix) :]
         else:
             rel_file = clean_file
+        if not rel_file or any(p in ("", ".", "..") for p in rel_file.split("/")):
+            return {"format": "litheRunEntrypoints", "version": 0, "entrypoints": []}
         project_selection = {
             "name": _project_name_for_dir(instance_dir),
             "path": norm_root,

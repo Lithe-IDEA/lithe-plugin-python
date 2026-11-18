@@ -187,7 +187,10 @@ def main(args=None, plugins=None):
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a.startswith("--junitxml="):
+        if a == "--":
+            selectors.extend(argv[i + 1:])
+            break
+        elif a.startswith("--junitxml="):
             junit_xml = a.split("=", 1)[1]
         elif a in ("-o", "-k"):
             i += 1

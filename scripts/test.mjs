@@ -187,7 +187,10 @@ function resolvePytestRuntime(scratchDir) {
       "    i = 0",
       "    while i < len(argv):",
       "        a = argv[i]",
-      "        if a.startswith('--junitxml='):",
+      "        if a == '--':",
+      "            selectors.extend(argv[i + 1:])",
+      "            break",
+      "        elif a.startswith('--junitxml='):",
       "            junit_xml = a.split('=', 1)[1]",
       "        elif a in ('-o', '-k'):",
       "            i += 1",
@@ -449,7 +452,7 @@ try {
       assert.equal(variant.schemaVersion, 0);
       assert.equal(variant.pluginAPIVersion, 0);
       assert.equal(variant.id, "io.github.lithe-idea.python-support");
-      assert.equal(variant.version, "0.1.2");
+      assert.equal(variant.version, "0.2.0");
       assert.equal(variant.vendor.id, "io.github.lithe-idea");
       assert.equal(variant.vendor.signatureRequirement, "none");
       assert.equal("commandInstallers" in variant, false, "must not declare commandInstallers");
@@ -932,6 +935,33 @@ try {
         "Suppressed functions MUST still emit operationFailed ERROR",
       );
 
+      // 6b. Unknown method and unknown functionID return static messages without echoing raw input.
+      peer.send({
+        jsonrpc: "2.0",
+        id: 81,
+        method: "secret/path/unknown-method",
+        params: {},
+      });
+      const unknownMethodErr = await peer.waitFor((m) => m.id === 81, "unknown method error");
+      assert.equal(unknownMethodErr.error?.code, -32601);
+      assert.equal(unknownMethodErr.error?.message, "The requested method is not supported.");
+      assert.ok(!unknownMethodErr.error.message.includes("secret"));
+
+      peer.send({
+        jsonrpc: "2.0",
+        id: 82,
+        method: "lithe/function/invoke",
+        params: {
+          operationID: "op-unknown-fn",
+          functionID: "secret.unregistered.fn",
+          params: {},
+        },
+      });
+      const unknownFnErr = await peer.waitFor((m) => m.id === 82, "unknown function error");
+      assert.equal(unknownFnErr.error?.code, -32602);
+      assert.equal(unknownFnErr.error?.message, "The requested plugin function is not registered.");
+      assert.ok(!unknownFnErr.error.message.includes("secret"));
+
       // 7. Clean shutdown + exit without creating any custom log files.
       peer.send({ jsonrpc: "2.0", id: 9, method: "shutdown", params: null });
       await peer.waitFor((m) => m.id === 9 && m.result === null, "backend shutdown");
@@ -1378,6 +1408,107 @@ try {
       const junitXml = readFileSync(junitXmlPath, "utf8");
       assert.match(junitXml, /tests="1"/);
       assert.match(junitXml, /test_scale\[2-6\]/);
+
+      // 4b. Security & contract selector regressions: traversal, symlink escape, flag injection, and stale/deleted suites
+      // MUST reject with controlled PluginError (never bypassing _safe_within or widening to -k), while valid dot-directories work!
+      const outsideDir = join(scratch, "outside-evil-tests");
+      const outsideCanary = join(scratch, "OUTSIDE_CANARY_MUST_NOT_EXIST");
+      mkdirSync(outsideDir, { recursive: true });
+      const outsidePy = join(outsideDir, "test_evil.py");
+      writeFileSync(
+        outsidePy,
+        `open(${JSON.stringify(outsideCanary)}, "w").write("pwned")\ndef test_evil():\n    assert True\n`,
+      );
+      if (process.platform !== "win32") {
+        const { symlinkSync } = await import("node:fs");
+        symlinkSync(outsidePy, join(wsDir, "tests", "test_escape_link.py"));
+      }
+
+      for (const [reqId, opId, badParams, expectedCode] of [
+        [61, "op-sel-traversal", { suite: "tests/../../outside-evil-tests/test_evil.py", case: "test_evil" }, "python.invalidTestSelector"],
+        [62, "op-sel-flag", { suite: "tests/test_calc.py", case: "--collect-only" }, "python.invalidTestSelector"],
+        [63, "op-sel-stale-path", { suite: "tests/test_deleted.py", case: "test_add" }, "python.staleTestSelector"],
+        [64, "op-sel-stale-dotted", { suite: "tests.test_deleted.TestCalc", case: "test_add" }, "python.staleTestSelector"],
+        [67, "op-sel-stale-case", { suite: "tests/test_calc.py", case: "TestCalc::test_removed" }, "python.staleTestSelector"],
+        [68, "op-sel-stale-project", { project: { name: "removed-project", path: "removed-project" } }, "python.staleTestSelector"],
+        [69, "op-sel-stale-target", { target: { properties: { directory: "removed-tests" } } }, "python.staleTestSelector"],
+      ]) {
+        peer.send({
+          jsonrpc: "2.0",
+          id: reqId,
+          method: "lithe/build/test",
+          params: {
+            operationID: opId,
+            buildSystemID: "python",
+            root: ".",
+            tool: { executable: pytestRuntime.executable },
+            project: { name: "calc-suite", path: "." },
+            ...badParams,
+            options: {},
+            optionArguments: [],
+            userArguments: [],
+            environment: pytestRuntime.environment,
+          },
+        });
+        const rej = await peer.waitFor((m) => m.id === reqId, `rejected selector ${opId}`);
+        assert.equal(rej.error?.code, -32000);
+        assert.equal(rej.error?.data?.code, expectedCode);
+        assert.ok(
+          peer.allReceived.some(
+            (m) => m.method === "lithe/log" && m.params?.operationId === opId && m.params?.kind === "operationFailed" && m.params?.code === expectedCode,
+          ),
+        );
+      }
+
+      if (process.platform !== "win32") {
+        peer.send({
+          jsonrpc: "2.0",
+          id: 65,
+          method: "lithe/build/test",
+          params: {
+            operationID: "op-sel-symlink",
+            buildSystemID: "python",
+            root: ".",
+            tool: { executable: pytestRuntime.executable },
+            project: { name: "calc-suite", path: "." },
+            suite: "tests/test_escape_link.py",
+            case: "test_evil",
+            options: {},
+            optionArguments: [],
+            userArguments: [],
+            environment: pytestRuntime.environment,
+          },
+        });
+        const symRej = await peer.waitFor((m) => m.id === 65, "rejected symlink escape selector");
+        assert.equal(symRej.error?.code, -32000);
+        assert.equal(symRej.error?.data?.code, "python.invalidTestSelector");
+        rmSync(join(wsDir, "tests", "test_escape_link.py"), { force: true });
+      }
+      assert.equal(existsSync(outsideCanary), false, "Outside test file must NEVER be executed");
+
+      // Valid dot-prefixed subdirectory (e.g. `.bench/test_dotdir.py`) must NOT be mangled by lstrip("./")!
+      mkdirSync(join(wsDir, ".bench"), { recursive: true });
+      writeFileSync(join(wsDir, ".bench", "test_dotdir.py"), "def test_dot_ok():\n    assert 2 * 2 == 4\n");
+      peer.send({
+        jsonrpc: "2.0",
+        id: 66,
+        method: "lithe/build/test",
+        params: {
+          operationID: "op-test-dotdir",
+          buildSystemID: "python",
+          root: ".",
+          tool: { executable: pytestRuntime.executable },
+          project: { name: "calc-suite", path: "." },
+          suite: ".bench/test_dotdir.py",
+          case: "test_dot_ok",
+          options: {},
+          optionArguments: [],
+          userArguments: [],
+          environment: pytestRuntime.environment,
+        },
+      });
+      const dotDirResp = await peer.waitFor((m) => m.id === 66, "dot-directory test run");
+      assert.equal(dotDirResp.result.exitCode, 0);
 
       // 5. lithe/build/runEntrypoints returns worker.py entrypoint and suppresses success INFO log.
       peer.send({

@@ -524,7 +524,7 @@ class JsonRpcServer:
     Implements litheLogging 0, litheFunctions 0, litheBuild 0/1, and litheToolchains 0.
     """
 
-    def __init__(self, *, name: str, version: str = "0.1.2") -> None:
+    def __init__(self, *, name: str, version: str = "0.2.0") -> None:
         self.name = name
         self.version = version
         self._functions: dict[str, Callable[[dict[str, Any], CallContext], Any]] = {}
@@ -759,7 +759,7 @@ class JsonRpcServer:
             if method == "lithe/build/runEntrypoints" and self._build_version < 1:
                 self._respond(
                     req_id,
-                    error={"code": ERROR_METHOD_NOT_FOUND, "message": f"Unsupported method: {method}"},
+                    error={"code": ERROR_METHOD_NOT_FOUND, "message": "The requested method is not supported."},
                 )
                 return
             self._executor.submit(self._invoke_build, req_id, method, params)
@@ -770,7 +770,7 @@ class JsonRpcServer:
 
         self._respond(
             req_id,
-            error={"code": ERROR_METHOD_NOT_FOUND, "message": f"Unsupported method: {method}"},
+            error={"code": ERROR_METHOD_NOT_FOUND, "message": "The requested method is not supported."},
         )
 
     def _handle_initialize(self, req_id: Any, params: dict[str, Any]) -> None:
@@ -908,7 +908,7 @@ class JsonRpcServer:
         if handler is None:
             self._respond(
                 req_id,
-                error={"code": ERROR_INVALID_PARAMS, "message": f"Function {fn_id} is not registered."},
+                error={"code": ERROR_INVALID_PARAMS, "message": "The requested plugin function is not registered."},
             )
             return
 
