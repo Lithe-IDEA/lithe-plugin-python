@@ -447,12 +447,16 @@ try {
     ]);
     assert.equal(JSON.parse(readFileSync(tomliOut, "utf8")).projects[0].name, "nested-svc");
 
-    // Verify non-zero exit on missing directory so host logs host.commandFailed.
-    const missing = spawnSync(pythonCmd, ["-I", "-B", buildModelScript, join(scratch, "does-not-exist"), tomliOut], {
+    // Verify non-zero exit on missing directory so host logs host.commandFailed,
+    // and assert stderr contains only controlled diagnostic code without leaking paths.
+    const secretMissingPath = join(scratch, "secret-path-token-do-not-log");
+    const missing = spawnSync(pythonCmd, ["-I", "-B", buildModelScript, secretMissingPath, tomliOut], {
       encoding: "utf8",
       timeout: 10_000,
     });
     assert.notEqual(missing.status, 0);
+    assert.equal(missing.stderr.trim(), "build_model.py: project_root_unavailable");
+    assert.ok(!missing.stderr.includes("secret-path-token-do-not-log"), "stderr must never echo raw paths");
   });
 
   await check("lineMatcher and outputLinkMatchers match mypy, Ruff, and Python Traceback output", () => {

@@ -2,7 +2,7 @@
 
 Python language support plugin for Lithe (`schemaVersion: 0`, `pluginAPIVersion: 0`), bundling [Pyrefly](https://github.com/facebook/pyrefly) `1.4.1` for fast static type checking and LSP navigation, and [debugpy](https://github.com/microsoft/debugpy) `1.8.22` for source-level debugging.
 
-遵循 Lithe 声明式插件契约 v0，为 Lithe 桌面端（macOS / Windows / Linux）提供开箱即用的 Python 语言支持、`.venv` 虚拟环境与多来源解释器发现、项目模型静态分析、`pytest` 测试集成、`uv` / `conda` / `Ruff` 构建任务、源码级断点调试及新建项目向导。跨平台能力覆盖详见 [docs/feature-matrix.md](docs/feature-matrix.md)。
+遵循 Lithe 声明式插件契约 v0，为 Lithe 桌面端（macOS / Windows / Linux）提供开箱即用的 Python 语言支持、`.venv` 虚拟环境与多来源解释器发现、项目模型静态分析、`pytest` 测试集成、`uv` / `conda` / `Ruff` 构建任务、源码级断点调试及新建项目向导。跨平台实现与验证记录详见 [docs/feature-matrix.md](docs/feature-matrix.md)。
 
 ---
 
@@ -10,7 +10,7 @@ Python language support plugin for Lithe (`schemaVersion: 0`, `pluginAPIVersion:
 
 1. **语言与编辑器基础（`languages: python`）**
    - 识别 `.py`、`.pyi`、`.pyw`，配置 `#` 行注释与括号/引号自动配对，声明 `pyproject.toml` / `setup.py` / `setup.cfg` / `requirements.txt` / `Pipfile` / `pyrefly.toml` 项目标记及 `.venv` / `venv` 项目依赖目录。
-2. **语言服务器（`languageServers: pyrefly`）**
+2. **语言服务器（`languageServers: python` / Pyrefly `1.4.1`）**
    - 构建期固定版本与 SHA-256 打包 `pyrefly 1.4.1`（Unix：`bin/pyrefly`，Windows：`bin/pyrefly.exe`），启动参数 `["lsp"]`，验证参数 `["--version"]`。
    - `workspaceConfiguration` 即时同步类型检查模式（`typeCheckingMode`）、诊断显示策略（`displayTypeErrors`）、诊断范围（`diagnosticMode`）、自动导入与括号补全，并通过 `indexingExclusions` 将工作区排除目录注入 `python.pyrefly.extraProjectExcludes`。
    - 不向 `pyrefly` 发送空字符串 `python.pythonPath: ""`，保留 `pyrefly` 对项目 `.venv`、`VIRTUAL_ENV`、`CONDA_PREFIX` 与 `pyproject.toml` 的原生环境自动解析。
@@ -31,19 +31,49 @@ Python language support plugin for Lithe (`schemaVersion: 0`, `pluginAPIVersion:
 
 ---
 
-## 日志接线说明（Logging Wiring）
+## 日志接线说明（Structured Logging v2 Wiring）
 
-本插件为纯声明式插件（无常驻插件后端进程），所有进程启动、诊断采集与落盘均接入宿主统一日志与可写存储边界，已安装插件目录在运行期保持 **100% 只读**：
+本插件 `0.1.0` 为**纯声明式插件**（不声明 `backend` 常驻进程），全部诊断均遵循 Lithe 结构化日志 v2 规范（Core `rust/logging/README.md` 与 `shared/plugins/contract/v1/README.md#structured-plugin-diagnostics`），已安装插件目录在运行期保持 **100% 只读**：
 
-| 子系统 / 能力 | 运行形态 | 日志分类 / 事件或文件 | 落盘位置、脱敏与清理策略 | 失败诊断信号 |
-| --- | --- | --- | --- | --- |
-| 清单、设置与国际化校验 | Core 纯函数校验 | `plugin.host` / `settings.io`（宿主统一日志 `app.jsonl`） | 宿主日志目录（macOS `~/Library/Logs/Lithe/`，Windows `%LOCALAPPDATA%\Lithe\Logs\`），遵循宿主路径脱敏与轮转清理 | `plugin.manifest.*`、`plugin.settings.invalidLocalization` |
-| 语言服务器（`pyrefly lsp`） | 宿主托管子进程（`stdio`） | `lsp.wire` / `lsp.lifecycle`（宿主记录生命周期与 stderr 摘要） | 宿主日志目录；`pyrefly` 不往插件包写任何缓存或锁文件 | 进程非零退出、初始化超时或 `validationArguments`（`--version`）失败 |
-| 工具链探测与 `.venv` 信任解析 | 宿主探针命令（`python --version`） | `toolchain` / `plugin.host` | 宿主日志目录；仅执行声明的只读 `--version` 探针，工作区未信任时拦截项目内 `.venv` 探针并记录 `projectCodeRequiresAction` | 版本正则不匹配、低于 `minimumVersion` 或 `unsafePath` 拒绝 |
-| 项目模型脚本（`scripts/build_model.py`） | 宿主构建模型命令（`python -I -B`） | `build`（宿主声明式命令日志） | 模型 JSON 写入宿主分配的临时 `${outputFile}`；错误信息仅输出至 `stderr` 由宿主采集，`-B` + `sys.dont_write_bytecode = True` 严禁生成 `.pyc` | 脚本返回非零退出码并输出 `stderr` 原因，宿主记录构建命令失败事件并展示给用户 |
-| 构建任务与 `pytest`（`python` / `uv` / `conda` / `ruff`） | 宿主构建/测试执行器 | `build` / `run` + 控制台流式输出 | 构建与测试输出实时流向构建/运行面板，JUnit 报告写入用户项目 `.pytest_cache/lithe-junit.xml`（已在 `layout` 中标记隐藏） | 非零退出码、`lineMatcher` 解析的诊断条目或 JUnit 失败用例 |
-| 调试适配器（`debugpy`） | 宿主托管 DAP 子进程（`stdio`） | `debug`（宿主 DAP 生命周期日志）+ `debugpy.*.log`（适配器原生日志） | 通过 `--log-dir ${logDir}` 定向写入宿主分配的可写插件日志槽位目录；`launch` 注入 `PYTHONDONTWRITEBYTECODE=1` 杜绝插件目录写入 | DAP 启动/握手失败事件及 `${logDir}/debugpy.adapter-*.log` 详细栈 |
-| 新建项目向导（`python-project`） | 宿主 `projectgen` 执行器 | `projectgen` / `plugin.host` | 仅在目标新项目目录写入模板文件与 `.venv`，不写入插件包 | 模板展开错误或 `venv` / `uv venv` 子进程非零退出及 `stderr` |
+### 1. SDK 后端日志接线适用性说明
+
+- **`litheLogging` 0 / `lithe/log` 协议上报**：**不适用（N/A）**——本版本无插件后端进程，不引入 Node/Java/Rust 插件后端 SDK。
+- **降级与恢复事件（`plugins.operation.fallback_selected` / `plugins.operation.recovery_finished`，`WARN`）**：**不适用（N/A）**——仅带 SDK 后端的插件函数存在插件内缓存回退或连接恢复分支。
+- **高频成功诊断抑制（`suppressSuccessDiagnostics`）**：**不适用（N/A）**——本版本不导出高频查询或轮询插件函数。
+
+### 2. 宿主代记的声明式插件操作（通道：`plugins/io.github.lithe-idea.python-support/host`）
+
+声明式贡献无插件后端进程，由实际执行该贡献的宿主或 Core 经 `diagnostics.recordPluginOperation` 将每次尝试的唯一终态代记到 v2 会话通道 `plugins/io.github.lithe-idea.python-support/host`（活动文件 `plugins/io.github.lithe-idea.python-support/host.log`，轮转文件 `~1.log`）。用户主动取消、停止或被新请求取代的尝试**不记录**：
+
+| `operation` | 声明来源 | 记录方 | 成功事件与级别 | 失败事件与级别 | 可能的 `host.*` 失败类别标识（`code`） |
+| --- | --- | --- | --- | --- | --- |
+| `languageServer/start` | `languageServers[]`（`python` / Pyrefly） | 启动前失败由桌面宿主记录；进入启动后经 `lsp.startServer.startupOperation` 交由 Core 记录唯一终态 | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.executableUnavailable`、`host.launchFailed`、`host.exitedEarly`、`host.initializeFailed`、`host.timedOut` |
+| `debugAdapter/start` | `debugAdapters[]`（`debugpy`） | 桌面宿主（`op` 为调试会话 ID；用户停止与 Core 拒绝建会话不记录） | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.executableUnavailable`、`host.launchFailed`、`host.exitedEarly`、`host.initializeFailed`、`host.timedOut` |
+| `lithe/build/model` | `buildSystems[0].model`（`scripts/build_model.py` 命令式模型） | 桌面宿主（`op` 为加载构建模型的操作） | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.planFailed`、`host.executableUnavailable`、`host.launchFailed`、`host.timedOut`、`host.commandFailed`、`host.outputInvalid` |
+
+> 注：本插件未声明 `buildSystems[].dependencies` 与 `commandInstallers[]`，因此 `lithe/build/dependencies` 与 `commandInstaller/install` 在本版本不会触发。
+
+#### `host.*` 失败类别标识语义对照
+
+| `code` | 触发阶段与含义 |
+| --- | --- |
+| `host.planFailed` | 声明式命令无法完成启动或参数规划（如缺少必需目录或模板变量非法） |
+| `host.executableUnavailable` | 声明的包内可执行文件、入口脚本或 `python` 运行时工具链无法解析或版本不满足 `minimumVersion` |
+| `host.launchFailed` | 已解析的进程启动失败（操作系统 `exec` / 创建进程失败） |
+| `host.exitedEarly` | `pyrefly lsp` 或 `debugpy` 适配器在完成 `initialize` 握手前提前退出 |
+| `host.initializeFailed` | 已启动的语言服务器或调试适配器 `initialize` 握手返回错误 |
+| `host.timedOut` | 启动握手或 `build_model.py` 命令超出宿主设定的有界超时 |
+| `host.commandFailed` | `build_model.py` 非零退出（脚本保证真实失败必返回非零退出码） |
+| `host.outputInvalid` | `build_model.py` 正常退出但 `${outputFile}` 不是合法的 `litheBuildModel` v0 JSON 文档 |
+
+### 3. 上游子进程通道、隐私边界与原生日志文件
+
+| 组件 / 命令 | v2 结构化通道或原生文件位置 | 级别、限流、脱敏与清理策略 |
+| --- | --- | --- |
+| `pyrefly lsp`（语言服务器） | 结构化通道：`lsp/python` | Core 记录 `lsp.process.started`、`lsp.protocol.initialized`、`lsp.session.updated`；上游 `window/logMessage` 与 `window/showMessage` 经 `lsp.message.logged` / `lsp.message.shown` 保留显式 `ERROR`/`WARN`/`INFO`/`DEBUG` 级别；未分类 `stderr` 经 `lsp.stderr.received` 固定记为 `DEBUG`（Core 限制每行 4 KiB、200 行/秒，再经 1 KiB 脱敏截断，仅在详细诊断开启时落盘）；详细诊断开启（15 分钟单次到期）时仅接纳 `$/logTrace.message` 摘要（`lsp.trace.received`），拒绝可能含源码的 `verbose` 载荷。`pyrefly` 不写任何插件内文件。 |
+| `debugpy`（调试适配器与启动器） | 结构化通道：`debug/debugpy`<br>原生日志文件：`sessions/<session>/plugins/io.github.lithe-idea.python-support/files/debugpy.*.log` | 结构化会话事件（`debug.process.started`、`debug.session.initialized`、`debug.session.state_changed`、`debug.session.finished`、`debug.session.failed`、`debug.operation.failed`、`debug.operation.cancelled`）写入 `debug/debugpy`；上游 `debugpy` 原生日志通过 `--log-dir ${logDir}` 定向写入桌面宿主 `Store.PluginFilesDirectory` 创建的当前会话专属目录（权限 `0700`，逐段校验拒绝软链越界，绝不写插件安装目录或 app bundle）。上游 `debugpy` 默认输出适配器/pydevd 诊断日志，按 `<pid>` 独立建文件（`debugpy.adapter-<pid>.log`、`debugpy.launcher-<pid>.log`、`debugpy.pydevd.<pid>.log`），无内置单文件轮转，随宿主日志会话生命周期统一保留与清理。 |
+| `scripts/build_model.py`（模型脚本） | 模型输出：宿主临时 `${outputFile}`<br>诊断输出：宿主构建命令 `stderr` 摘要 | 脚本以 `python -I -B` 与 `sys.dont_write_bytecode = True` 运行；`stdout` 不输出自由文本，`stderr` 严格只输出受控简短分类词（`invalid_arguments`、`project_root_unavailable`、`model_generation_failed (<ExceptionType>)`），**绝不拼接工作区路径、用户源码或原始异常消息**。 |
+| 工具链探针、构建任务、`pytest` 与项目生成 | 宿主 `app` / `app/core` 请求轨迹及构建/运行/向导面板 | `python --version` 探针受工作区信任门控保护（未信任工作区零探测项目内 `.venv`）；`pip`、`mypy`、`pytest`、`uv`、`conda`、`ruff` 与 `projectgen` 子进程输出流向对应 UI 控制台与 JUnit XML（`.pytest_cache/lithe-junit.xml`），进程 `stdout`、源码与环境变量值绝不进入 v2 结构化日志。 |
 
 ---
 
@@ -53,9 +83,9 @@ Python language support plugin for Lithe (`schemaVersion: 0`, `pluginAPIVersion:
 
 | 路径 | 归属与用途 | 生命周期 | 跨 Git Worktree 复用策略 |
 | --- | --- | --- | --- |
-| `.cache/` | `scripts/package.mjs` 下载并经 SHA-256 校验的上游原始归档（`pyrefly` 6 平台压缩包、`debugpy` wheel、`tomli` wheel） | 本地持久化缓存（已被 `.gitignore` 忽略） | **可安全复制复用**（文件名含上游版本与平台，读取前强制校验 `vendor-lock.json` SHA-256；建议复制到新工作树 `.cache/`，勿跨并发打包共享写） |
+| `.cache/` | `scripts/package.mjs` 下载并经 SHA-256 校验的上游原始归档（`pyrefly` 6 平台压缩包、`debugpy` wheel、`tomli` wheel） | 本地持久化缓存（已被 `.gitignore` 忽略） | **可安全复制复用**（文件名含上游版本与平台，读取前强制校验 `vendor-lock.json` SHA-256；复制到新工作树 `.cache/`，勿跨并发打包共享写） |
 | `.artifacts/stage/` | 打包过程中的单平台解包暂存目录 | 每次 `scripts/package.mjs` 按平台重建（`.gitignore` 忽略） | **不可复用**（构建中间产物，毫秒级重建） |
-| `.artifacts/lithe-host/` | `scripts/e2e-host.mjs` 检出的宿主稀疏工作树及其编译产物 | 本地按需保留（`.gitignore` 忽略） | 其内部 `.artifacts/desktop` 在同一操作系统、CPU 架构与相同 `PINNED_CORE_REVISION` 前提下可按宿主规则复制加速，不得跨工作树软链共用 |
+| `.artifacts/lithe-host/` | `scripts/e2e-host.mjs` 检出的宿主稀疏工作树及其编译产物 | 本地按需保留（`.gitignore` 忽略） | 其内部 `.artifacts/desktop` 在同一操作系统、CPU 架构与相同 `PINNED_CORE_REVISION` 前提下可按宿主规则复制加速，不得跨工作树软链共用；任何运行时会话日志目录（`sessions/<session>/plugins/.../files/`）与状态目录严禁跨工作树复制 |
 | `dist/` | 最终产出的 `python-support-<version>-<platform>.zip` 发布包 | 打包输出（`.gitignore` 忽略） | 按需重新运行 `node scripts/package.mjs` 生成 |
 
 ### 常用命令

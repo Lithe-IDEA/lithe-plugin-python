@@ -1,21 +1,25 @@
 # Python Support 功能矩阵（Feature Matrix）
 
-本文档维护 `io.github.lithe-idea.python-support` 插件在各桌面平台上的能力支持状态（插件的功能矩阵仅在插件仓库维护，不进入宿主仓库）。
+本文档维护 `io.github.lithe-idea.python-support` 插件在 6 个目标发布平台上的实现与真实执行验证状态（插件功能矩阵与测试证据仅在本插件仓库维护，不进入宿主仓库）。
 
-状态说明：
-- `✅ 已实现`：已在清单、脚本与打包归档中实现并通过自动化验证。
-- `🚧 规划中`：归属后续里程碑（M3 插件后端进程能力）。
+## 状态定义
 
-| 能力域 | 功能项 | macOS (`darwin-arm64` / `darwin-x64`) | Windows (`windows-x64` / `windows-arm64`) | Linux (`linux-x64` / `linux-arm64`) | 说明 |
-| --- | --- | --- | --- | --- | --- |
-| 语言基础 (`languages`) | `.py` / `.pyi` / `.pyw` 识别、括号配对、`#` 行注释、项目标记与依赖目录（`.venv` / `venv`） | ✅ 已实现 | ✅ 已实现 | ✅ 已实现 | 纯声明式契约 v0 |
-| 语言服务器 (`languageServers`) | 内置打包 `pyrefly` 1.4.1（`pyrefly lsp`）：实时类型检查、悬停、跳转定义、查找引用、补全与自动导入、工作区符号、重构重命名 | ✅ 已实现 | ✅ 已实现 | ✅ 已实现 | 构建期按 6 平台固定 SHA-256 打包至 `bin/pyrefly(.exe)`；支持排除目录同步（`extraProjectExcludes`）与即时分析配置 |
-| 工具链与虚拟环境 (`toolDefinitions`) | `python` 解释器解析：项目覆盖 → `.venv` / `venv`（经工作区信任门控）→ `VIRTUAL_ENV` → `PATH` → 自动发现（Homebrew / Framework / 系统 `/usr` / Windows `Programs/Python` / `pyenv` / `pyenv-win` / `uv` / `conda` / `miniforge` / `miniconda` / `anaconda`） | ✅ 已实现 | ✅ 已实现 | ✅ 已实现 | 遵循 Core 4 层优先级与项目环境软链安全边界；不注入在无 `bin/` 布局下触发 `unsafePath` 的 `pathPrepend` |
-| 构建与运行 (`buildSystems: python`) | `scripts/build_model.py` 纯 AST + `tomllib`/`tomli` 静态识别 `[project.scripts]`、包 `__main__.py`、顶层 `__main__` 脚本、Django `manage.py`、FastAPI ASGI、Flask WSGI（零用户代码执行） | ✅ 已实现 | ✅ 已实现 | ✅ 已实现 | `-I -B` 隔离运行，Python 3.9–3.10 自动回退内置 `vendor/tomli` |
-| 任务与测试 (`buildSystems: python`) | `pip install -r requirements.txt`、`mypy`（含诊断 `lineMatcher`）、`pytest`（支持工作区/项目/目标及 `suite` / `case` 过滤，JUnit XML 报告解析） | ✅ 已实现 | ✅ 已实现 | ✅ 已实现 | 报告路径 `.pytest_cache/lithe-junit.xml`，排除 `.venv`/`venv` 并隐藏缓存目录 |
-| 包与环境工具 (`buildSystems: uv / conda / ruff`) | 独立构建系统：`uv`（`uv sync` / `uv lock`）、`conda`（`conda env update --file environment.yml --prune`）、`ruff`（`ruff check` 含 `lineMatcher` / `ruff format`） | ✅ 已实现 | ✅ 已实现 | ✅ 已实现 | 按各自标记文件独立激活，使用用户环境中的 `uv` / `conda` / `ruff` |
-| 调试器 (`debugAdapters`) | 内置打包 `debugpy` 1.8.22（`stdio` DAP）：单文件与目标 `launch`（自动注入 `PYTHONDONTWRITEBYTECODE=1` 保持只读插件包零字节写入）、远程 `attach`（`host:port` + `pathMappings`） | ✅ 已实现 | ✅ 已实现 | ✅ 已实现 | 复用选定 `python` 工具链（`>= 3.9`），适配器日志写入宿主分配的 `${logDir}` |
-| 终端输出跳转 (`outputLinkMatchers`) | Python Traceback `File "...", line N` 点击跳转源码与行号 | ✅ 已实现 | ✅ 已实现 | ✅ 已实现 | Core 正则命名捕获组匹配 |
-| 新建项目向导 (`projectGenerators`) | 新建 Python 项目：选择并固定项目级 `python` 工具链，支持 `none` / `venv (.venv)` / `uv (.venv)` 环境初始化与示例代码生成 | ✅ 已实现 | ✅ 已实现 | ✅ 已实现 | Unix 调用 `python3` / `uv`，Windows 归档自动切换为 `python` / `uv` |
-| 国际化 (`l10n`) | 英文默认文案 + `l10n/zh-Hans.json` 简体中文完整设置与分组翻译 | ✅ 已实现 | ✅ 已实现 | ✅ 已实现 | 通过 `plugin-l10n.schema.json` 与 Core `settingsState` 校验 |
-| 高级插件后端能力（M3） | `pytest --collect-only` 原生测试树发现、依赖树视图、`pyproject.toml` 原生配置页编辑器、工具链后端深度枚举 | 🚧 规划中 | 🚧 规划中 | 🚧 规划中 | 规划于后续 M3 后端进程版本 |
+- `✅ 已验证`：已在目标平台实机完成打包安装、真实上游二进制/运行时进程执行及宿主端到端测试验证。
+- `⏳ 待实机验证（pending）`：已在 `plugin.json`、脚本与对应平台归档（`dist/python-support-0.1.0-<platform>.zip`）中完成实现，并通过归档路径/大小写安全检查、Lithe Store 规则校验以及 Unix/Windows 双清单真实 Core `ValidatePluginManifest` 契约校验；但尚未在对应 OS/架构实机或 CI runner 上执行原生子进程工作流，严禁在未实跑前标为已验证。
+- `🚧 规划中（M3）`：归属后续 M3 插件后端进程版本。
+
+## 跨平台能力与验证矩阵
+
+| 能力域 | 功能项 | `darwin-arm64` | `darwin-x64` | `windows-x64` / `windows-arm64` | `linux-x64` / `linux-arm64` | 最近实机验证 | 实现与测试证据路径（本仓库） |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 语言基础 (`languages`) | `.py` / `.pyi` / `.pyw` 识别、`#` 行注释、括号/引号配对、项目标记与 `.venv` / `venv` 依赖目录 | ✅ 已验证 | ⏳ pending（归档与清单已校验） | ⏳ pending（归档与 Windows 清单已校验） | ⏳ pending（归档与清单已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/plugin.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
+| 语言服务器 (`languageServers`) | 内置打包 `pyrefly` `1.4.1`（`bin/pyrefly` / `bin/pyrefly.exe`、`lsp`、`--version`、`workspaceConfiguration`、`indexingExclusions`，保留 `.venv` 原生自动发现） | ✅ 已验证 | ⏳ pending（`macos-x86_64` 二进制已打包校验） | ⏳ pending（`bin/pyrefly.exe` 已打包与契约校验） | ⏳ pending（`musl` 二进制已打包校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/plugin.json`<br>`vendor-lock.json`<br>`scripts/package.mjs`<br>`scripts/package/archives.test.mjs`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
+| 工具链与虚拟环境 (`toolDefinitions`) | `python` 4 层解析：项目绑定 → `.venv` / `venv`（受工作区信任门控，保留字面软链路径）→ 全局设置 → `VIRTUAL_ENV` + `PATH` → 16 条跨平台自动发现规则 | ✅ 已验证 | ⏳ pending（清单与 Core 规则已校验） | ⏳ pending（`Scripts/python.exe` / `python.exe` 布局与发现规则已通过 Core 校验） | ⏳ pending（清单与 Core 规则已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/plugin.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
+| 构建模型与运行 (`buildSystems: python`) | `scripts/build_model.py`（`-I -B`，纯 AST + `tomllib` / `vendor/tomli` 零代码执行）静态发现 `[project.scripts]`、包 `__main__.py`、顶层 `__main__` 脚本、Django `manage.py`、FastAPI ASGI、Flask WSGI 并派生 `run` 配置 | ✅ 已验证 | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/scripts/build_model.py`<br>`io.github.lithe-idea.python-support/plugin.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
+| 任务与测试 (`buildSystems: python`) | `pip install -r requirements.txt`、`mypy`（含诊断 `lineMatcher`）、`pytest`（支持工作区/项目/目标及 `suite` / `case` 过滤，解析 `.pytest_cache/lithe-junit.xml`） | ✅ 已验证 | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/plugin.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
+| 独立工具构建系统 (`uv` / `conda` / `ruff`) | `uv`（`sync` / `lock`）、`conda`（`env update --file environment.yml --prune`）、`ruff`（`check` 含 `lineMatcher` / `format`）按各自标记文件独立检测与规划 | ✅ 已验证 | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/plugin.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
+| 调试器 (`debugAdapters: debugpy`) | 内置打包 `debugpy` `1.8.22`（`stdio` DAP，`["-E", "-s", "-B"]`、`--log-dir ${logDir}`、`launch` 注入 `PYTHONDONTWRITEBYTECODE=1` 保持只读插件目录零写入、支持远程 `attach` + `pathMappings`） | ✅ 已验证 | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/plugin.json`<br>`vendor-lock.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
+| 终端输出跳转 (`outputLinkMatchers`) | Python Traceback `File "...", line N` 点击定位源码与行号 | ✅ 已验证 | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/plugin.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
+| 新建项目向导 (`projectGenerators`) | `python-project`：选择并固定项目级 `python` 工具链（`pinAs: "project"`），可选 `none` / `venv (.venv)` / `uv (.venv)` 与示例代码生成（Windows 自动将 `python3` 命令切换为 `python`） | ✅ 已验证 | ⏳ pending（归档已校验） | ⏳ pending（Windows 清单 `python` 命令切换已校验） | ⏳ pending（归档已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/plugin.json`<br>`io.github.lithe-idea.python-support/templates/python/`<br>`scripts/package/archives.test.mjs`<br>`e2e/host/desktop/internal/projectgen/python_integration_test.go` |
+| 国际化 (`l10n`) | 英文默认文案 + `l10n/zh-Hans.json` 简体中文完整设置与分组翻译 | ✅ 已验证 | ⏳ pending（归档与 Core `settingsState` 已校验） | ⏳ pending（归档与 Core `settingsState` 已校验） | ⏳ pending（归档与 Core `settingsState` 已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/l10n/zh-Hans.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
+| 插件后端高级能力（M3） | `pytest --collect-only` 原生测试树发现、依赖树视图、`pyproject.toml` 原生配置页编辑器、工具链后端深度枚举 | 🚧 规划中（M3） | 🚧 规划中（M3） | 🚧 规划中（M3） | 🚧 规划中（M3） | — | — |

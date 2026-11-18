@@ -623,19 +623,19 @@ def build_model(root_dir: Path) -> dict:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
-        sys.stderr.write("Usage: build_model.py <project_root> <output_file>\n")
+        sys.stderr.write("build_model.py: invalid_arguments\n")
         return 2
     root_dir = _resolve_instance_root(argv[1])
     output_path = Path(argv[2])
     if not root_dir.exists() or not root_dir.is_dir():
-        sys.stderr.write(f"build_model.py: project root does not exist or is not a directory: {argv[1]}\n")
+        sys.stderr.write("build_model.py: project_root_unavailable\n")
         return 1
     try:
         model = build_model(root_dir)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(model, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except Exception as exc:
-        sys.stderr.write(f"build_model.py: failed to generate build model: {exc}\n")
+        sys.stderr.write(f"build_model.py: model_generation_failed ({type(exc).__name__})\n")
         return 1
     return 0
 
