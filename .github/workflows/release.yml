@@ -16,17 +16,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Check whether release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; skipping workflow build."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v4
+        if: steps.check.outputs.exists != 'true'
       - uses: actions/setup-node@v4
+        if: steps.check.outputs.exists != 'true'
         with:
           node-version: 22
       - name: Build 6 platform archives
+        if: steps.check.outputs.exists != 'true'
         run: |
           set -o pipefail
           node scripts/package.mjs --expect-tag "$GITHUB_REF_NAME" | tee "$RUNNER_TEMP/checksums.txt"
       - name: Verify release archives
+        if: steps.check.outputs.exists != 'true'
         run: node --test --test-timeout=60000 scripts/package/*.test.mjs
       - name: Publish GitHub Release
+        if: steps.check.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PRERELEASE_TAGS: v0.1.0
