@@ -2,7 +2,7 @@
   "schemaVersion": 0,
   "id": "io.github.lithe-idea.python-support",
   "displayName": "Python Support",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "vendor": {
     "id": "io.github.lithe-idea",
     "displayName": "Lithe Community",
@@ -803,8 +803,8 @@
             "kind": "runtime",
             "tool": "python",
             "minimumVersion": "3.9",
-            "runtimeArguments": ["-E", "-s", "-B"],
-            "entry": "vendor/debugpy/adapter/__main__.py"
+            "runtimeArguments": ["-I", "-B"],
+            "entry": "scripts/debugpy_adapter.py"
           },
           "arguments": ["--log-dir", "${logDir}"]
         },

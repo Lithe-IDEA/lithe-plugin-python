@@ -45,7 +45,7 @@ jobs:
         if: steps.check.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          PRERELEASE_TAGS: v0.1.0
+          PRERELEASE_TAGS: v0.1.0 v0.1.1
         run: |
           prerelease=false
           for tag in $PRERELEASE_TAGS; do

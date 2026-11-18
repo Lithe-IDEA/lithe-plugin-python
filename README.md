@@ -23,8 +23,8 @@ Python language support plugin for Lithe (`schemaVersion: 0`, `pluginAPIVersion:
    - `conda`（`environment.yml` / `environment.yaml`）：`conda env update --file environment.yml --prune`。
    - `ruff`（`ruff.toml` / `.ruff.toml` / `pyproject.toml`）：`ruff check`（带诊断 `lineMatcher`）与 `ruff format`。
 5. **调试器（`debugAdapters: debugpy`）**
-   - 复用当前选定的 `python` 工具链（`>= 3.9`），以 `["-E", "-s", "-B"]` 隔离参数启动内置 `vendor/debugpy/adapter/__main__.py --log-dir ${logDir}`（注：Python 3.11+ 的 `-I` 隐含 `-P` 不注入脚本目录到 `sys.path[0]`，会导致上游 `debugpy/adapter/__main__.py` 相对导入失败；`debugpy` 在完成自身导入后即主动移除 `sys.path[0]`，配合 `-E -s -B` 兼顾完全环境隔离与 Python 3.9–3.14 兼容）。
-   - `launch` 默认开启 `"console": "internalConsole"`、`"justMyCode": true` 并注入 `"env": {"PYTHONDONTWRITEBYTECODE": "1"}`，防止 `debugpy/launcher` 子进程往只读已安装插件目录写入 `__pycache__`；同时支持远程 TCP `attach`（`host` / `port` / `pathMappings`）。
+   - 复用当前选定的 `python` 工具链（`>= 3.9`），以 `["-I", "-B"]` 隔离参数启动 `scripts/debugpy_adapter.py --log-dir ${logDir}`，在加载内置 `vendor/debugpy/adapter/__main__.py` 前显式设置 `PYTHONDONTWRITEBYTECODE=1` 并补齐 `sys.path[0]`（兼容 Python 3.9–3.14 的 `-I` 隔离模式，同时确保 `debugpy/adapter` 拉起的 `debugpy/launcher` 子进程在 Windows / macOS / Linux 可写插件目录下也不会生成任何 `__pycache__` 字节码）。
+   - `launch` 默认开启 `"console": "internalConsole"`、`"justMyCode": true` 并注入 `"env": {"PYTHONDONTWRITEBYTECODE": "1"}`；同时支持远程 TCP `attach`（`host` / `port` / `pathMappings`）。
 6. **终端 Traceback 链接与新建项目向导（`outputLinkMatchers` & `projectGenerators`）**
    - 自动识别终端输出中的 `File "...", line N` 并支持一键跳转源码。
    - 新建项目向导支持选择并固定项目级 `python` 解释器（`pinAs: "project"`），可选 `None` / `venv (.venv)` / `uv (.venv)` 环境创建与示例代码生成。

@@ -71,6 +71,7 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
       `${PACKAGE_ID}/THIRD-PARTY-NOTICES.txt`,
       `${PACKAGE_ID}/l10n/zh-Hans.json`,
       `${PACKAGE_ID}/scripts/build_model.py`,
+      `${PACKAGE_ID}/scripts/debugpy_adapter.py`,
       `${PACKAGE_ID}/vendor/debugpy/adapter/__main__.py`,
       `${PACKAGE_ID}/vendor/debugpy/ThirdPartyNotices.txt`,
       `${PACKAGE_ID}/vendor/tomli/__init__.py`,

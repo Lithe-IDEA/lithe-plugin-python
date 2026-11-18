@@ -330,10 +330,10 @@ try {
     }
   });
 
-  // Snapshot unpacked plugin directory and mark it read-only before running any plugin tools!
+  // Snapshot unpacked plugin directory while keeping it writable (matching Windows and
+  // user-writable plugin directories) so any stray __pycache__ write by a child process
+  // such as debugpy/launcher is caught immediately instead of masked by POSIX 0555!
   const beforeSnapshot = snapshotDirectoryHashes(unpackedPluginDir);
-  setDirectoryTreeReadOnly(unpackedPluginDir, true);
-  madeReadOnly = true;
 
   const buildModelScript = join(unpackedPluginDir, "scripts", "build_model.py");
 
