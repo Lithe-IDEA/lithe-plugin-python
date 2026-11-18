@@ -25,7 +25,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readZipEntries } from "./lib/archive.mjs";
 import { ASSET_PREFIX, manifestForPlatform, PACKAGE_ID, packagePlatforms, sha256File } from "./package.mjs";
@@ -1070,7 +1070,7 @@ try {
     const wsLocalVenv = join(wsRoot, ".venv");
 
     const makeFakePythonHome = (dir, ver, isConda = false) => {
-      const binDir = process.platform === "win32" ? join(dir, "Scripts") : join(dir, "bin");
+      const binDir = process.platform === "win32" ? (isConda ? dir : join(dir, "Scripts")) : join(dir, "bin");
       mkdirSync(binDir, { recursive: true });
       const exeName = process.platform === "win32" ? "python.exe" : "python3";
       const exePath = join(binDir, exeName);
@@ -1093,7 +1093,8 @@ try {
     makeFakePythonHome(wsLocalVenv, "3.12.1", false);
 
     mkdirSync(join(fakeHome, ".conda"), { recursive: true });
-    writeFileSync(join(fakeHome, ".conda", "environments.txt"), `# comment\n${condaEnvDir}\n`);
+    const condaRegistry = join(fakeHome, ".conda", "environments.txt");
+    writeFileSync(condaRegistry, `# comment\n${condaEnvDir}\n`);
     writeFileSync(join(wsRoot, ".python-version"), "3.11\n");
     writeFileSync(
       join(wsRoot, "pyproject.toml"),
@@ -1112,16 +1113,23 @@ try {
     const pipenvDir = join(workonRoot, pipenvName);
     makeFakePythonHome(pipenvDir, "3.12.3", false);
 
+    const discoveryEnv = {
+      HOME: fakeHome,
+      USERPROFILE: fakeHome,
+      UV_PYTHON_INSTALL_DIR: dirname(uvPyDir),
+      PYENV_ROOT: join(scratch, "pyenv-root"),
+      WORKON_HOME: workonRoot,
+      CONDA_ENVS_PATH: "",
+      CONDA_PREFIX: "",
+    };
+    // Windows environment variable names are case-insensitive. Ensure inherited
+    // entries with different capitalization cannot shadow the fixture values.
+    const inherited = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !(key.toUpperCase() in discoveryEnv)),
+    );
     const child = spawn(pythonCmd, ["-I", "-B", backendScript, "--state", join(scratch, "tc-state")], {
       cwd: scratch,
-      env: {
-        ...process.env,
-        HOME: fakeHome,
-        USERPROFILE: fakeHome,
-        UV_PYTHON_INSTALL_DIR: dirname(uvPyDir),
-        PYENV_ROOT: join(scratch, "pyenv-root"),
-        WORKON_HOME: workonRoot,
-      },
+      env: { ...inherited, ...discoveryEnv },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -1161,24 +1169,35 @@ try {
       assert.equal(reply.result.generation, 3);
       assert.equal(reply.result.providerID, "python");
 
-      const homes = reply.result.installations.map((i) => i.home);
-      assert.ok(homes.includes(realpathSync(condaEnvDir)), "Expected ~/.conda/environments.txt installation");
-      assert.ok(homes.includes(realpathSync(uvPyDir)), "Expected UV_PYTHON_INSTALL_DIR installation");
-      assert.ok(homes.includes(realpathSync(pyenvVerDir)), "Expected PYENV_ROOT installation");
-      assert.ok(homes.includes(realpathSync(pipenvDir)), "Expected WORKON_HOME Pipenv installation");
-      assert.equal(homes.includes(realpathSync(wsLocalVenv)), false, "Must NEVER return workspace-local .venv");
+      // Python and Node may preserve different drive letter and directory
+      // casing for a real path on Windows. Compare native path identities.
+      const pathKey = (path) => {
+        const nativePath = normalize(path);
+        return process.platform === "win32" ? nativePath.toLowerCase() : nativePath;
+      };
+      const expectedPath = (path) => pathKey(realpathSync.native(path));
+      assert.ok(
+        reply.result.watch.map(pathKey).includes(expectedPath(condaRegistry)),
+        "Expected toolchain discovery to read the fixture home",
+      );
+      const homes = reply.result.installations.map((installation) => pathKey(installation.home));
+      assert.ok(homes.includes(expectedPath(condaEnvDir)), "Expected ~/.conda/environments.txt installation");
+      assert.ok(homes.includes(expectedPath(uvPyDir)), "Expected UV_PYTHON_INSTALL_DIR installation");
+      assert.ok(homes.includes(expectedPath(pyenvVerDir)), "Expected PYENV_ROOT installation");
+      assert.ok(homes.includes(expectedPath(pipenvDir)), "Expected WORKON_HOME Pipenv installation");
+      assert.equal(homes.includes(expectedPath(wsLocalVenv)), false, "Must NEVER return workspace-local .venv");
 
-      const bySource = Object.fromEntries(reply.result.statements.map((s) => [s.source, s]));
-      const pyVerStmt = bySource[realpathSync(join(wsRoot, ".python-version"))];
+      const bySource = new Map(reply.result.statements.map((statement) => [pathKey(statement.source), statement]));
+      const pyVerStmt = bySource.get(expectedPath(join(wsRoot, ".python-version")));
       assert.ok(pyVerStmt);
-      assert.equal(pyVerStmt.installation, realpathSync(condaEnvDir));
-      const pyprojStmt = bySource[realpathSync(join(wsRoot, "pyproject.toml"))];
+      assert.equal(pathKey(pyVerStmt.installation), expectedPath(condaEnvDir));
+      const pyprojStmt = bySource.get(expectedPath(join(wsRoot, "pyproject.toml")));
       assert.ok(pyprojStmt);
-      assert.equal(pyprojStmt.installation, realpathSync(uvPyDir));
-      const pipfileStmt = bySource[realpathSync(join(wsRoot, "Pipfile"))];
+      assert.equal(pathKey(pyprojStmt.installation), expectedPath(uvPyDir));
+      const pipfileStmt = bySource.get(expectedPath(join(wsRoot, "Pipfile")));
       assert.ok(pipfileStmt);
       assert.equal(pipfileStmt.kind, "environment");
-      assert.equal(pipfileStmt.installation, realpathSync(pipenvDir));
+      assert.equal(pathKey(pipfileStmt.installation), expectedPath(pipenvDir));
 
       // Remote authority must return -32071 plugin.toolchain.authorityUnsupported.
       peer.send({

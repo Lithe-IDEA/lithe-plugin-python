@@ -100,8 +100,14 @@ finally:
                             token.cancel()
                         worker.join(6)
                         self.assertFalse(worker.is_alive(), "subprocess cleanup did not finish")
-                        self.assertEqual(ready.read(1), b"", "descendant still owns its connection")
-                    pid = None
+                        try:
+                            self.assertEqual(ready.read(1), b"", "descendant still owns its connection")
+                        except ConnectionResetError:
+                            # Job termination can close a Windows socket with
+                            # a reset instead of an orderly end-of-stream.
+                            if os.name != "nt":
+                                raise
+                        pid = None
                     if mode == "cancel":
                         self.assertIsInstance(result[0], CancelledError)
                     else:
