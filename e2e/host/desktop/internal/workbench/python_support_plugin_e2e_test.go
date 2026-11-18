@@ -102,134 +102,17 @@ func pythonFileURI(path string) string {
 	return (&url.URL{Scheme: "file", Path: slashed}).String()
 }
 
-func hasPytestInstalled(ctx context.Context, pythonExec string, extraEnv map[string]string) bool {
-	if pythonExec == "" {
-		return false
-	}
-	cmd := exec.CommandContext(ctx, pythonExec, "-B", "-c", "import pytest")
-	cmd.Env = os.Environ()
-	for k, v := range extraEnv {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
-	return cmd.Run() == nil
-}
-
-// resolvePytestToolForE2E returns a Python executable + optional environment that can run pytest,
-// preferring systemPython, then local developer virtualenvs, and finally a tiny hermetic pytest module.
 func resolvePytestToolForE2E(t *testing.T, ctx context.Context, systemPython string) core.BuildTool {
 	t.Helper()
-	if hasPytestInstalled(ctx, systemPython, nil) {
-		return core.BuildTool{Executable: systemPython}
+	executable := os.Getenv("PYTEST_PYTHON")
+	if executable == "" {
+		executable = systemPython
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		entries, _ := os.ReadDir(home)
-		for _, entry := range entries {
-			name := entry.Name()
-			if strings.HasPrefix(name, ".venv") || strings.Contains(name, "conda") || strings.HasPrefix(name, "miniforge") {
-				cand := filepath.Join(home, name, "bin", "python3")
-				if runtime.GOOS == "windows" {
-					cand = filepath.Join(home, name, "Scripts", "python.exe")
-				}
-				if info, statErr := os.Stat(cand); statErr == nil && !info.IsDir() && hasPytestInstalled(ctx, cand, nil) {
-					return core.BuildTool{Executable: cand}
-				}
-			}
-		}
+	cmd := exec.CommandContext(ctx, executable, "-B", "-c", "import pytest")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("pytest is required for the host test; set PYTEST_PYTHON to an interpreter with pytest: %v", err)
 	}
-
-	// Hermetic offline fallback so air-gapped hosts never require PyPI access.
-	shimDir := t.TempDir()
-	pkgDir := filepath.Join(shimDir, "pytest")
-	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	shimInit := `import importlib.util, inspect, pathlib, sys, xml.etree.ElementTree as ET
-class _Item:
-    def __init__(self, nodeid, path, name, fn):
-        self.nodeid, self.path, self.name, self.fn = nodeid, path, name, fn
-class _Config:
-    def __init__(self, rootpath):
-        self.rootpath = rootpath
-def _parametrize(argnames, argvalues):
-    names = [n.strip() for n in argnames.split(",")] if isinstance(argnames, str) else list(argnames)
-    def _deco(fn):
-        fn._parametrize = (names, list(argvalues))
-        return fn
-    return _deco
-class _Mark:
-    parametrize = staticmethod(_parametrize)
-mark = _Mark()
-def _discover(root):
-    items = []
-    for p in sorted(root.rglob("test_*.py")):
-        rel = p.relative_to(root).as_posix()
-        spec = importlib.util.spec_from_file_location(rel.replace("/", "_").replace(".py", ""), p)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        for k, v in vars(mod).items():
-            if callable(v) and k.startswith("test_"):
-                prm = getattr(v, "_parametrize", None)
-                if prm:
-                    pnames, pvals = prm
-                    for row in pvals:
-                        vals = row if isinstance(row, (tuple, list)) else (row,)
-                        lbl = "-".join(str(x) for x in vals)
-                        kw = dict(zip(pnames, vals))
-                        items.append(_Item(f"{rel}::{k}[{lbl}]", p, f"{k}[{lbl}]", lambda fn=v, kw=kw: fn(**kw)))
-                else:
-                    items.append(_Item(f"{rel}::{k}", p, k, v))
-    return items
-def main(args=None, plugins=None):
-    argv = list(args or sys.argv[1:])
-    collect_only = "--collect-only" in argv
-    junit_xml = None
-    selectors = []
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        if a == "--":
-            selectors.extend(argv[i + 1:])
-            break
-        elif a.startswith("--junitxml="):
-            junit_xml = a.split("=", 1)[1]
-        elif a in ("-o", "-k"):
-            i += 1
-        elif not a.startswith("-"):
-            selectors.append(a)
-        i += 1
-    cwd = pathlib.Path.cwd().resolve()
-    items = _discover(cwd)
-    if selectors:
-        items = [it for it in items if any(it.nodeid == s or it.nodeid.startswith(s + "::") for s in selectors)]
-    cfg = _Config(cwd)
-    for plug in (plugins or []):
-        if hasattr(plug, "pytest_collection_modifyitems"):
-            plug.pytest_collection_modifyitems(None, cfg, items)
-    if not items:
-        return 5
-    if collect_only:
-        return 0
-    suite_el = ET.Element("testsuite", name="pytest", tests=str(len(items)), failures="0")
-    for it in items:
-        cname = it.path.relative_to(cwd).with_suffix("").as_posix().replace("/", ".")
-        ET.SubElement(suite_el, "testcase", classname=cname, name=it.name, time="0.001")
-        it.fn()
-    if junit_xml:
-        out_p = cwd / junit_xml
-        out_p.parent.mkdir(parents=True, exist_ok=True)
-        ET.ElementTree(suite_el).write(out_p, encoding="utf-8", xml_declaration=True)
-    return 0
-`
-	if err := os.WriteFile(filepath.Join(pkgDir, "__init__.py"), []byte(shimInit), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(pkgDir, "__main__.py"), []byte("import pytest, sys\nraise SystemExit(pytest.main(sys.argv[1:]))\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return core.BuildTool{
-		Executable:  systemPython,
-		Environment: map[string]string{"PYTHONPATH": shimDir},
-	}
+	return core.BuildTool{Executable: executable}
 }
 
 func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
@@ -715,16 +598,6 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatal(err)
 	}
 	testProviderParams["tool"] = map[string]any{"executable": pytestTool.Executable}
-	if len(pytestTool.Environment) > 0 {
-		envObj, _ := testProviderParams["environment"].(map[string]any)
-		if envObj == nil {
-			envObj = map[string]any{}
-		}
-		for k, v := range pytestTool.Environment {
-			envObj[k] = v
-		}
-		testProviderParams["environment"] = envObj
-	}
 	enrichedTestParams, err := json.Marshal(testProviderParams)
 	if err != nil {
 		t.Fatal(err)

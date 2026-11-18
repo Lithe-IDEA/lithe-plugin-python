@@ -30,11 +30,13 @@ from build_model import (  # noqa: E402
 from lithe_rpc import (  # noqa: E402
     CallContext,
     JsonRpcServer,
+    MAX_BUILD_RESULT_BYTES,
     PluginError,
     run_bounded_process,
 )
 
 _MAX_DISCOVERED_TESTS = 10_000
+_MAX_TEST_SELECTOR_BYTES = 1024
 _JUNIT_REPORT_REL = ".pytest_cache/lithe-junit.xml"
 
 _PYTEST_COLLECTOR_SNIPPET = """
@@ -44,20 +46,35 @@ os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 out_path = pathlib.Path(sys.argv[1])
 cache_dir = sys.argv[2]
-extra_args = sys.argv[3:]
+project = json.loads(sys.argv[3])
+max_items, max_bytes, max_selector_bytes = map(int, sys.argv[4:7])
+extra_args = sys.argv[7:]
 
 try:
     import pytest
 except ModuleNotFoundError:
     sys.exit(197)
 
-collected = []
 cwd_real = pathlib.Path.cwd().resolve()
 
+def valid_selector(text):
+    try:
+        return (text.strip() and not text.lstrip().startswith("-")
+                and len(text.encode("utf-8")) <= max_selector_bytes
+                and not any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in text))
+    except UnicodeEncodeError:
+        return False
+
 class _LitheTestCollector:
-    def pytest_collection_modifyitems(self, session, config, items):
-        root_real = pathlib.Path(str(config.rootpath)).resolve()
-        for item in items:
+    def __init__(self):
+        self.items = []
+        self.omitted = 0
+
+    def pytest_collection_finish(self, session):
+        root_real = pathlib.Path(str(session.config.rootpath)).resolve()
+        # Reserve room for JSON keys, counters and the provider response envelope.
+        remaining_bytes = max_bytes - 128
+        for item in session.items:
             nodeid = getattr(item, "nodeid", "")
             if not isinstance(nodeid, str) or not nodeid:
                 continue
@@ -79,12 +96,19 @@ class _LitheTestCollector:
                     resolved_suite = None
             if (
                 resolved_suite
-                and cpart
-                and not resolved_suite.startswith("-")
-                and not cpart.startswith("-")
+                and valid_selector(resolved_suite)
+                and valid_selector(cpart)
+                and ":" not in resolved_suite and "\\\\" not in resolved_suite
                 and all(seg not in ("", ".", "..") and not seg.startswith("-") for seg in resolved_suite.split("/"))
             ):
-                collected.append({"suite": resolved_suite, "case": cpart})
+                if len(self.items) < max_items:
+                    selector = {"suite": resolved_suite, "case": cpart, "project": project}
+                    size = len(json.dumps(selector, ensure_ascii=False).encode("utf-8")) + 2
+                    if size <= remaining_bytes:
+                        self.items.append(selector)
+                        remaining_bytes -= size
+                        continue
+            self.omitted += 1
 
 args = [
     "--collect-only",
@@ -96,13 +120,14 @@ args = [
     f"cache_dir={cache_dir}",
     *extra_args,
 ]
-raw_code = pytest.main(args, plugins=[_LitheTestCollector()])
+collector = _LitheTestCollector()
+raw_code = pytest.main(args, plugins=[collector])
 try:
     exit_code = int(raw_code)
 except Exception:
     exit_code = 1
 out_path.write_text(
-    json.dumps({"exitCode": exit_code, "items": collected}, ensure_ascii=False),
+    json.dumps({"items": collector.items, "omitted": collector.omitted}, ensure_ascii=False),
     encoding="utf-8",
 )
 sys.exit(exit_code)
@@ -201,17 +226,18 @@ def _resolve_pytest_selector_args(
     suite: Any,
     case: Any,
     target: Optional[dict[str, Any]],
-) -> tuple[list[str], list[str]]:
+) -> list[str]:
     """
-    Validates and maps (suite, case, target) into `(filter_flags, positional_targets)`:
-    - Never widens an unresolvable or stale `suite` to `-k`; rejects with controlled `PluginError`.
+    Validates and maps (suite, case, target) into pytest positional selectors.
+    - A case requires a suite for an exact node ID.
     - Enforces strict workspace containment (`_safe_within`) on every resolved file/directory.
-    - Separates option flags (`-k`) from positional selectors (passed after `--`).
     """
     instance_real = instance_dir.resolve()
 
     clean_case: Optional[str] = None
     if case is not None:
+        if suite is None:
+            raise PluginError("python.invalidTestSelector", "A pytest case requires its test suite.")
         if (
             not isinstance(case, str)
             or not case.strip()
@@ -232,11 +258,12 @@ def _resolve_pytest_selector_args(
         ):
             raise PluginError("python.invalidTestSelector", "The requested test suite selector is invalid.")
 
-        if "/" in suite or "\\" in suite or suite.endswith((".py", ".pyi", ".pyw")):
+        if ("/" in suite or "\\" in suite or suite.endswith((".py", ".pyi", ".pyw"))
+                or (instance_dir / suite).is_file()):
             norm_suite = _validate_safe_rel_selector_path(suite, allow_dot=False)
             _verify_contained_path(instance_dir, instance_real, norm_suite, expect_dir=False)
             nodeid = f"{norm_suite}::{clean_case}" if clean_case else norm_suite
-            return [], [nodeid]
+            return [nodeid]
 
         # Dotted JUnit XML classname suite (e.g. "tests.test_calc.TestCalc" or "tests.test_calc").
         parts = suite.split(".")
@@ -251,7 +278,7 @@ def _resolve_pytest_selector_args(
                 rem = parts[idx:]
                 resolved_base = f"{mod_rel}::{'::'.join(rem)}" if rem else mod_rel
                 nodeid = f"{resolved_base}::{clean_case}" if clean_case else resolved_base
-                return [], [nodeid]
+                return [nodeid]
 
         raise PluginError("python.staleTestSelector", "The requested test suite could not be resolved in the project.")
 
@@ -264,9 +291,7 @@ def _resolve_pytest_selector_args(
                 _verify_contained_path(instance_dir, instance_real, norm_target, expect_dir=True)
                 target_dir = norm_target
 
-    filter_flags = ["-k", clean_case] if clean_case else []
-    positional = [target_dir] if target_dir else []
-    return filter_flags, positional
+    return [target_dir] if target_dir else []
 
 
 def create_build_provider_server(*, cache_dir: Optional[str] = None) -> JsonRpcServer:
@@ -396,6 +421,10 @@ def create_build_provider_server(*, cache_dir: Optional[str] = None) -> JsonRpcS
                 _PYTEST_COLLECTOR_SNIPPET,
                 str(out_json_path),
                 str(pytest_cache_dir),
+                json.dumps(project_selection),
+                str(_MAX_DISCOVERED_TESTS),
+                str(MAX_BUILD_RESULT_BYTES),
+                str(_MAX_TEST_SELECTOR_BYTES),
                 *option_args,
             ]
             try:
@@ -432,51 +461,29 @@ def create_build_provider_server(*, cache_dir: Optional[str] = None) -> JsonRpcS
                 )
 
             try:
-                payload = json.loads(out_json_path.read_text(encoding="utf-8"))
-            except Exception as exc:
+                with out_json_path.open("rb") as collection:
+                    data = collection.read(MAX_BUILD_RESULT_BYTES + 1)
+                if len(data) > MAX_BUILD_RESULT_BYTES:
+                    raise ValueError("pytest collection report exceeds its byte budget")
+                payload = json.loads(data)
+                items = payload["items"]
+                omitted = payload["omitted"]
+                if (not isinstance(items, list) or len(items) > _MAX_DISCOVERED_TESTS
+                        or type(omitted) is not int or omitted < 0):
+                    raise ValueError("invalid pytest collection report")
+            except (OSError, ValueError, TypeError, KeyError) as exc:
                 raise PluginError(
                     "python.pytestCollectionFailed",
                     "pytest returned an unreadable test collection payload.",
                 ) from exc
 
-        raw_items = payload.get("items") if isinstance(payload, dict) else None
-        if not isinstance(raw_items, list):
-            raw_items = []
-
-        valid_selectors: list[dict[str, Any]] = []
-        for item in raw_items:
-            if not isinstance(item, dict):
-                continue
-            suite = item.get("suite")
-            case = item.get("case")
-            if (
-                not isinstance(suite, str)
-                or not isinstance(case, str)
-                or not suite.strip()
-                or not case.strip()
-                or suite.startswith("-")
-                or case.startswith("-")
-                or len(suite) > 1024
-                or len(case) > 1024
-                or any(ord(c) < 32 or ord(c) == 127 for c in suite)
-                or any(ord(c) < 32 or ord(c) == 127 for c in case)
-            ):
-                continue
-            valid_selectors.append({
-                "suite": suite,
-                "case": case,
-                "project": project_selection,
-            })
-
-        if len(valid_selectors) > _MAX_DISCOVERED_TESTS:
-            dropped = len(valid_selectors) - _MAX_DISCOVERED_TESTS
-            valid_selectors = valid_selectors[:_MAX_DISCOVERED_TESTS]
-            ctx.diagnostics.degraded("lithe/build/discoverTests", "test_discovery_truncated", dropped)
+        if omitted:
+            ctx.diagnostics.degraded("lithe/build/discoverTests", "test_discovery_truncated", omitted)
 
         return {
             "format": "litheTestDiscovery",
             "version": 0,
-            "tests": valid_selectors,
+            "tests": items,
         }
 
     def handle_test(params: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
@@ -503,7 +510,7 @@ def create_build_provider_server(*, cache_dir: Optional[str] = None) -> JsonRpcS
         user_args = _string_args(params.get("userArguments"))
 
         # Validate selectors BEFORE touching disk or spawning pytest so stale/invalid selectors reject cleanly.
-        filter_flags, positional_targets = _resolve_pytest_selector_args(run_cwd, raw_suite, raw_case, target)
+        positional_targets = _resolve_pytest_selector_args(run_cwd, raw_suite, raw_case, target)
 
         junit_file = run_cwd / Path(*_JUNIT_REPORT_REL.split("/"))
         try:
@@ -519,7 +526,6 @@ def create_build_provider_server(*, cache_dir: Optional[str] = None) -> JsonRpcS
             "-m",
             "pytest",
             f"--junitxml={_JUNIT_REPORT_REL}",
-            *filter_flags,
             *option_args,
             *user_args,
             *(["--", *positional_targets] if positional_targets else []),

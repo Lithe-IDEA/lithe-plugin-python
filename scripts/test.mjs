@@ -24,7 +24,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readZipEntries } from "./lib/archive.mjs";
@@ -94,149 +94,10 @@ function hasPytest(executable, extraEnv = {}) {
   return resUser.status === 0;
 }
 
-/**
- * Resolves a Python interpreter + optional environment that has `pytest` available,
- * preferring `pythonCmd` (CI default), then any local virtualenv on the developer machine,
- * and finally a deterministic hermetic pytest shim in `scratchDir` for air-gapped environments.
- */
-function resolvePytestRuntime(scratchDir) {
-  if (hasPytest(pythonCmd)) {
-    const abs = run(pythonCmd, ["-B", "-c", "import sys; print(sys.executable)"]).trim();
-    return { executable: abs, environment: {}, realPytest: true };
-  }
-  const candidates = [];
-  if (process.env.PYTEST_PYTHON) {
-    candidates.push(process.env.PYTEST_PYTHON);
-  }
-  try {
-    const home = homedir();
-    for (const name of readdirSync(home)) {
-      if (name.startsWith(".venv") || name.includes("conda") || name.startsWith("miniforge")) {
-        candidates.push(
-          process.platform === "win32"
-            ? join(home, name, "Scripts", "python.exe")
-            : join(home, name, "bin", "python3"),
-        );
-      }
-    }
-  } catch {}
-  for (const cand of candidates) {
-    if (existsSync(cand) && hasPytest(cand)) {
-      return { executable: cand, environment: {}, realPytest: true };
-    }
-  }
-
-  // Air-gapped fallback: hermetic pytest implementation supporting --collect-only, nodeids, and --junitxml.
-  const shimSite = join(scratchDir, "hermetic-pytest-site");
-  const pkgDir = join(shimSite, "pytest");
-  mkdirSync(pkgDir, { recursive: true });
-  writeFileSync(
-    join(pkgDir, "__init__.py"),
-    [
-      "import ast, inspect, importlib.util, pathlib, re, sys, xml.etree.ElementTree as ET",
-      "class _Item:",
-      "    def __init__(self, nodeid, path, name, fn):",
-      "        self.nodeid = nodeid",
-      "        self.path = path",
-      "        self.name = name",
-      "        self.fn = fn",
-      "class _Config:",
-      "    def __init__(self, rootpath):",
-      "        self.rootpath = rootpath",
-      "def mark_parametrize(argnames, argvalues):",
-      "    names = [n.strip() for n in argnames.split(',')] if isinstance(argnames, str) else list(argnames)",
-      "    def _deco(fn):",
-      "        fn._parametrize = (names, list(argvalues))",
-      "        return fn",
-      "    return _deco",
-      "class _Mark:",
-      "    parametrize = staticmethod(mark_parametrize)",
-      "mark = _Mark()",
-      "def _discover(root):",
-      "    items = []",
-      "    for path in sorted(root.rglob('test_*.py')):",
-      "        rel = path.relative_to(root).as_posix()",
-      "        spec = importlib.util.spec_from_file_location(rel.replace('/', '_').replace('.py', ''), path)",
-      "        mod = importlib.util.module_from_spec(spec)",
-      "        spec.loader.exec_module(mod)",
-      "        for attr_name, obj in vars(mod).items():",
-      "            if callable(obj) and attr_name.startswith('test_'):",
-      "                params = getattr(obj, '_parametrize', None)",
-      "                if params:",
-      "                    pnames, pvals = params",
-      "                    for row in pvals:",
-      "                        vals = row if isinstance(row, (tuple, list)) else (row,)",
-      "                        label = '-'.join(str(v) for v in vals)",
-      "                        kw = dict(zip(pnames, vals))",
-      "                        items.append(_Item(f'{rel}::{attr_name}[{label}]', path, f'{attr_name}[{label}]', lambda fn=obj, kw=kw: fn(**kw)))",
-      "                else:",
-      "                    items.append(_Item(f'{rel}::{attr_name}', path, attr_name, obj))",
-      "            elif inspect.isclass(obj) and attr_name.startswith('Test'):",
-      "                inst = obj()",
-      "                for mname in dir(obj):",
-      "                    if mname.startswith('test_'):",
-      "                        mfn = getattr(inst, mname)",
-      "                        if callable(mfn):",
-      "                            items.append(_Item(f'{rel}::{attr_name}::{mname}', path, mname, mfn))",
-      "    return items",
-      "def main(args=None, plugins=None):",
-      "    argv = list(args or sys.argv[1:])",
-      "    collect_only = '--collect-only' in argv",
-      "    junit_xml = None",
-      "    selectors = []",
-      "    i = 0",
-      "    while i < len(argv):",
-      "        a = argv[i]",
-      "        if a == '--':",
-      "            selectors.extend(argv[i + 1:])",
-      "            break",
-      "        elif a.startswith('--junitxml='):",
-      "            junit_xml = a.split('=', 1)[1]",
-      "        elif a in ('-o', '-k'):",
-      "            i += 1",
-      "        elif not a.startswith('-'):",
-      "            selectors.append(a)",
-      "        i += 1",
-      "    cwd = pathlib.Path.cwd().resolve()",
-      "    try:",
-      "        items = _discover(cwd)",
-      "    except Exception as exc:",
-      "        sys.stderr.write(f'collection error: {exc}\\n')",
-      "        return 2",
-      "    if selectors:",
-      "        items = [it for it in items if any(it.nodeid == s or it.nodeid.startswith(s + '::') or it.nodeid.startswith(s.rstrip('/') + '/') for s in selectors)]",
-      "    cfg = _Config(cwd)",
-      "    for plug in (plugins or []):",
-      "        if hasattr(plug, 'pytest_collection_modifyitems'):",
-      "            plug.pytest_collection_modifyitems(None, cfg, items)",
-      "    if not items:",
-      "        return 5",
-      "    if collect_only:",
-      "        return 0",
-      "    suite_el = ET.Element('testsuite', name='pytest', tests=str(len(items)))",
-      "    failed = 0",
-      "    for it in items:",
-      "        cname = it.path.relative_to(cwd).with_suffix('').as_posix().replace('/', '.')",
-      "        tc = ET.SubElement(suite_el, 'testcase', classname=cname, name=it.name, time='0.001')",
-      "        try:",
-      "            it.fn()",
-      "            sys.stdout.write(f'PASSED {it.nodeid}\\n')",
-      "        except Exception as exc:",
-      "            failed += 1",
-      "            fl = ET.SubElement(tc, 'failure', message=str(exc))",
-      "            fl.text = str(exc)",
-      "            sys.stdout.write(f'FAILED {it.nodeid}\\n')",
-      "    suite_el.set('failures', str(failed))",
-      "    if junit_xml:",
-      "        out_p = cwd / junit_xml",
-      "        out_p.parent.mkdir(parents=True, exist_ok=True)",
-      "        ET.ElementTree(suite_el).write(out_p, encoding='utf-8', xml_declaration=True)",
-      "    return 1 if failed else 0",
-    ].join("\n") + "\n",
-  );
-  writeFileSync(join(pkgDir, "__main__.py"), "import pytest, sys\nraise SystemExit(pytest.main(sys.argv[1:]))\n");
-  const abs = run(pythonCmd, ["-B", "-c", "import sys; print(sys.executable)"]).trim();
-  return { executable: abs, environment: { PYTHONPATH: shimSite }, realPytest: false };
+function resolvePytestRuntime() {
+  const executable = process.env.PYTEST_PYTHON ?? pythonCmd;
+  assert.ok(hasPytest(executable), "Install pytest in PYTHON or set PYTEST_PYTHON to an interpreter with pytest");
+  return run(executable, ["-B", "-c", "import sys; print(sys.executable)"]).trim();
 }
 
 /** Creates an isolated virtualenv that is guaranteed NOT to have `pytest` installed. */
@@ -1228,7 +1089,7 @@ try {
   });
 
   await check("build_provider.py executes model (with degraded/recovered), pytest --collect-only discovery, pytest JUnit XML test runs, runEntrypoints, and cancellation cleanup", async () => {
-    const pytestRuntime = resolvePytestRuntime(scratch);
+    const pytestExecutable = resolvePytestRuntime();
     const noPytestExec = ensureNoPytestPython(scratch);
 
     const wsDir = join(scratch, "pytest-workspace");
@@ -1308,8 +1169,15 @@ try {
         "Expected degraded pyproject_parse_failed log",
       );
 
-      // Fix pyproject.toml and verify recovered diagnostic + updated project name!
-      writeFileSync(join(wsDir, "pyproject.toml"), '[project]\nname = "calc-suite"\nversion = "0.2.0"\n');
+      // Fix pyproject.toml and keep UTF-8 parameter IDs to exercise the Core byte limit.
+      writeFileSync(join(wsDir, "pyproject.toml"), [
+        "[project]",
+        'name = "calc-suite"',
+        'version = "0.2.0"',
+        "[tool.pytest.ini_options]",
+        "disable_test_id_escaping_and_forfeit_all_rights_to_community_support = true",
+        "",
+      ].join("\n"));
       peer.send({
         jsonrpc: "2.0",
         id: 3,
@@ -1346,10 +1214,10 @@ try {
           operationID: "op-discover-1",
           buildSystemID: "python",
           root: ".",
-          tool: { executable: pytestRuntime.executable },
+          tool: { executable: pytestExecutable },
           options: {},
           optionArguments: [],
-          environment: pytestRuntime.environment,
+          environment: {},
         },
       });
       const discResp = await peer.waitFor((m) => m.id === 4, "discoverTests response");
@@ -1404,14 +1272,14 @@ try {
           operationID: "op-test-single",
           buildSystemID: "python",
           root: ".",
-          tool: { executable: pytestRuntime.executable },
+          tool: { executable: pytestExecutable },
           project: { name: "calc-suite", path: "." },
           suite: "tests/test_calc.py",
           case: "test_scale[2-6]",
           options: {},
           optionArguments: [],
           userArguments: [],
-          environment: pytestRuntime.environment,
+          environment: {},
         },
       });
       const testRunResp = await peer.waitFor((m) => m.id === 6, "lithe/build/test response");
@@ -1427,6 +1295,59 @@ try {
       const junitXml = readFileSync(junitXmlPath, "utf8");
       assert.match(junitXml, /tests="1"/);
       assert.match(junitXml, /test_scale\[2-6\]/);
+
+      writeFileSync(join(wsDir, "tests", "test_names.py"), [
+        "import pytest",
+        "def test_add():",
+        "    assert True",
+        "def test_additional():",
+        "    assert True",
+        "@pytest.mark.parametrize('value', [pytest.param(1, id='é' * 600)])",
+        "def test_long_id(value):",
+        "    assert value == 1",
+        "",
+      ].join("\n"));
+      writeFileSync(join(wsDir, "test_notes.txt"), ">>> 1 + 1\n2\n");
+      peer.send({
+        jsonrpc: "2.0", id: 67, method: "lithe/build/test",
+        params: {
+          operationID: "op-case-only",
+          buildSystemID: "python", root: ".", tool: { executable: pytestExecutable },
+          case: "test_add", options: {}, optionArguments: [], userArguments: [], environment: {},
+        },
+      });
+      const caseOnly = await peer.waitFor((m) => m.id === 67, "case without a suite");
+      assert.equal(caseOnly.error?.data?.code, "python.invalidTestSelector");
+      assert.equal(readFileSync(junitXmlPath, "utf8"), junitXml);
+
+      peer.send({
+        jsonrpc: "2.0", id: 69, method: "lithe/build/discoverTests",
+        params: {
+          operationID: "op-discover-long-id",
+          buildSystemID: "python", root: ".", tool: { executable: pytestExecutable },
+          options: {}, optionArguments: [], environment: {},
+        },
+      });
+      const withLongId = await peer.waitFor((m) => m.id === 69, "discover with oversized UTF-8 test ID");
+      assert.deepEqual(
+        withLongId.result.tests.filter(({ suite }) => suite === "tests/test_names.py").map(({ case: name }) => name).sort(),
+        ["test_add", "test_additional"],
+      );
+      assert.ok(peer.allReceived.some((m) => m.method === "lithe/log"
+        && m.params?.operationId === "op-discover-long-id" && m.params?.code === "test_discovery_truncated"));
+      const doctest = withLongId.result.tests.find(({ suite }) => suite === "test_notes.txt");
+      assert.ok(doctest, "pytest must discover a root-level doctest");
+      peer.send({
+        jsonrpc: "2.0", id: 70, method: "lithe/build/test",
+        params: {
+          operationID: "op-exact-doctest",
+          buildSystemID: "python", root: ".", tool: { executable: pytestExecutable },
+          options: {}, optionArguments: [], userArguments: [], environment: {}, ...doctest,
+        },
+      });
+      const doctestRun = await peer.waitFor((m) => m.id === 70, "run discovered root-level doctest");
+      assert.equal(doctestRun.result?.exitCode, 0);
+      assert.match(readFileSync(junitXmlPath, "utf8"), /tests="1"/);
 
       // 4b. Security & contract selector regressions: traversal, symlink escape, flag injection, and stale/deleted suites
       // MUST reject with controlled PluginError (never bypassing _safe_within or widening to -k), while valid dot-directories work!
@@ -1460,13 +1381,13 @@ try {
             operationID: opId,
             buildSystemID: "python",
             root: ".",
-            tool: { executable: pytestRuntime.executable },
+            tool: { executable: pytestExecutable },
             project: { name: "calc-suite", path: "." },
             ...badParams,
             options: {},
             optionArguments: [],
             userArguments: [],
-            environment: pytestRuntime.environment,
+            environment: {},
           },
         });
         const rej = await peer.waitFor((m) => m.id === reqId, `rejected selector ${opId}`);
@@ -1488,14 +1409,14 @@ try {
             operationID: "op-sel-symlink",
             buildSystemID: "python",
             root: ".",
-            tool: { executable: pytestRuntime.executable },
+            tool: { executable: pytestExecutable },
             project: { name: "calc-suite", path: "." },
             suite: "tests/test_escape_link.py",
             case: "test_evil",
             options: {},
             optionArguments: [],
             userArguments: [],
-            environment: pytestRuntime.environment,
+            environment: {},
           },
         });
         const symRej = await peer.waitFor((m) => m.id === 65, "rejected symlink escape selector");
@@ -1516,14 +1437,14 @@ try {
           operationID: "op-test-dotdir",
           buildSystemID: "python",
           root: ".",
-          tool: { executable: pytestRuntime.executable },
+          tool: { executable: pytestExecutable },
           project: { name: "calc-suite", path: "." },
           suite: ".bench/test_dotdir.py",
           case: "test_dot_ok",
           options: {},
           optionArguments: [],
           userArguments: [],
-          environment: pytestRuntime.environment,
+          environment: {},
         },
       });
       const dotDirResp = await peer.waitFor((m) => m.id === 66, "dot-directory test run");
@@ -1575,10 +1496,10 @@ try {
           operationID: "op-discover-cancel",
           buildSystemID: "python",
           root: ".",
-          tool: { executable: pytestRuntime.executable },
+          tool: { executable: pytestExecutable },
           options: {},
           optionArguments: [],
-          environment: pytestRuntime.environment,
+          environment: {},
         },
       });
 

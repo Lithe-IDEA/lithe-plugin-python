@@ -21,8 +21,8 @@ Python language support plugin for Lithe (`v0.2.0`, `schemaVersion: 0`, `pluginA
 4. **4 个独立构建系统与动态 `pytest` 测试树（`buildSystems` & `buildProviders`）**
    - `python`：通过纯 Python 构建提供者 `scripts/build_provider.py --cache ${workspaceStateDir}`（`python -I -B`，`executesProjectCode: true`，`mayUseNetwork: false`）承载：
      - `lithe/build/model`：复用 `scripts/build_model.py` 纯 `ast` + `tomllib`（Python 3.9–3.10 自动回退内置 `vendor/tomli`）静态提取 `[project.scripts]`、包 `__main__.py`、顶层 `__main__` 脚本、Django `manage.py`、FastAPI ASGI、Flask WSGI 运行目标（绝不执行用户代码），派生 7 类声明式 `run` 配置；
-     - `lithe/build/discoverTests`：运行有界、可随 `$/cancelRequest` 整组终止的 `pytest --collect-only` 收集函数、类方法与 `@pytest.mark.parametrize` 参数化用例（缓存写入 `${workspaceStateDir}`，不向工作区写 `.pytest_cache`），返回标准 `litheTestDiscovery` v0；
-     - `lithe/build/test`：支持从动态测试树精确 nodeid 或 JUnit XML 类名运行单个用例和套件，实时推送 `lithe/build/progress` 并产出 `.pytest_cache/lithe-junit.xml` 供 Core `junitXml` 解码。构建请求在排队时即可取消，执行进程的所有权随请求结束。macOS 和 Linux 使用 POSIX 进程组，Windows 使用 Job Object。
+     - `lithe/build/discoverTests`：运行可随 `$/cancelRequest` 整组终止的 `pytest --collect-only`，收集函数、类方法与参数化用例，按 Core 的条数和 UTF-8 字节限制返回 `litheTestDiscovery` v0。缓存写入 `${workspaceStateDir}`。
+     - `lithe/build/test`：通过 pytest node ID 精确运行套件或单个用例，也接受 JUnit XML 类名。指定用例时须同时给出套件。运行时推送 `lithe/build/progress`，并产出 `.pytest_cache/lithe-junit.xml` 供 Core 解码。构建请求在排队时即可取消，执行进程的所有权随请求结束。macOS 和 Linux 使用 POSIX 进程组，Windows 使用 Job Object。
      - `lithe/build/runEntrypoints`：协商 `litheBuild` 1 时按文件静态识别入口并抑制高频成功日志；
      - 同时保留声明式任务 `pip install -r requirements.txt` 与 `mypy`（带诊断 `lineMatcher`）。
    - `uv`（`uv.lock`）：`uv sync`、`uv lock`。
@@ -52,7 +52,7 @@ Python language support plugin for Lithe (`v0.2.0`, `schemaVersion: 0`, `pluginA
 | `pyrefly.resolveLaunch` | `backend.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "invalid_tool_hint"`，`count: 1`）<br>恢复：`plugins.operation.recovery_finished`（`code: "tool_hint_restored"`，`count: 1`） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `invalid_tool_hint`、`tool_hint_restored`、`python.unknownServer`、`internal_error` |
 | `python.inspectEnvironment` | `backend.py` | **已启用 `suppressSuccessDiagnostics`**（高频只读查询成功不发 `INFO`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidExecutable`、`internal_error` |
 | `lithe/build/model` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "pyproject_parse_failed"`，`count: 1`）<br>恢复：`plugins.operation.recovery_finished`（`code: "pyproject_restored"`，`count: 1`） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `pyproject_parse_failed`、`pyproject_restored`、`python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
-| `lithe/build/discoverTests` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "test_discovery_truncated"`，`count` 为超出 10,000 上限被截断的条目数） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `test_discovery_truncated`、`python.pytestUnavailable`、`python.pytestTimedOut`、`python.pytestCollectionFailed`、`python.interpreterUnavailable`、`python.cacheUnavailable` |
+| `lithe/build/discoverTests` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "test_discovery_truncated"`，`count` 为超出条数、大小或无法表示为有效选择器而省略的条目数） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `test_discovery_truncated`、`python.pytestUnavailable`、`python.pytestTimedOut`、`python.pytestCollectionFailed`、`python.interpreterUnavailable`、`python.cacheUnavailable` |
 | `lithe/build/test` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`；测试断言失败仍属正常协议返回 `exitCode != 0`，失效/越界选择器、进程级超时或解释器缺失才记 `ERROR`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidTestSelector`、`python.staleTestSelector`、`python.pytestTimedOut`、`python.interpreterUnavailable`、`python.projectUnavailable`、`internal_error` |
 | `lithe/build/runEntrypoints` | `build_provider.py` | **已启用 `suppressSuccessDiagnostics`**（打开文件高频静态入口探测成功不发 `INFO`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
 | `notification` / `result-encoding` / `shutdown` | `lithe_rpc.py` | — | — | `plugins.operation.failed`（`ERROR`） | `framing_error`、`result_encoding_failed`、`internal_error` |
@@ -91,6 +91,8 @@ Python language support plugin for Lithe (`v0.2.0`, `schemaVersion: 0`, `pluginA
 | `dist/` | 最终产出的 `python-support-<version>-<platform>.zip` 发布包 | 打包输出（`.gitignore` 忽略） | 按需重新运行 `node scripts/package.mjs` 生成 |
 
 ### 常用命令
+
+插件测试使用真实 pytest。将 pytest 安装到 `PYTHON` 对应的环境，或通过 `PYTEST_PYTHON` 指定已安装 pytest 的解释器。
 
 ```bash
 # 打包当前开发平台（例如 macOS Apple Silicon）
