@@ -1,0 +1,60 @@
+name: Release
+
+# Push a tag v<version> matching plugin.json to publish a GitHub Release.
+# Lithe Store's tracker picks up stable releases and opens index pull requests.
+# Tags listed in PRERELEASE_TAGS below are published as pre-releases, which the
+# tracker skips until a compatible Lithe desktop release is out.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build 6 platform archives
+        run: |
+          set -o pipefail
+          node scripts/package.mjs --expect-tag "$GITHUB_REF_NAME" | tee "$RUNNER_TEMP/checksums.txt"
+      - name: Verify release archives
+        run: node --test --test-timeout=60000 scripts/package/*.test.mjs
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE_TAGS: v0.1.0
+        run: |
+          prerelease=false
+          for tag in $PRERELEASE_TAGS; do
+            if [[ "$tag" == "$GITHUB_REF_NAME" ]]; then prerelease=true; fi
+          done
+          {
+            echo "兼容性：按插件契约 v0（schemaVersion 0、pluginAPIVersion 0）构建，需要支持声明式插件契约 v0 与项目内工具环境（.venv）信任解析的新版 Lithe 桌面端（desktop-v* 预发布）。"
+            echo
+            if [[ -s "docs/releases/$GITHUB_REF_NAME.md" ]]; then
+              cat "docs/releases/$GITHUB_REF_NAME.md"
+              echo
+            fi
+            if [[ "$prerelease" == true ]]; then
+              echo "安装：预发布版本，Lithe Store 自动追踪会跳过。下载对应平台的 ZIP，在 设置 → 插件 中点击 从文件安装…，选中 ZIP 后核对 SHA-256 并确认。"
+            else
+              echo "安装：Lithe Store（https://github.com/Lithe-IDEA/Lithe-store）收录后，可在 设置 → 插件 → 插件市场 中搜索 Python Support 并安装。"
+            fi
+            echo
+            echo "SHA-256："
+            echo '```'
+            sed 's#^dist/##' "$RUNNER_TEMP/checksums.txt"
+            echo '```'
+          } > "$RUNNER_TEMP/notes.md"
+          release_flags=()
+          if [[ "$prerelease" == true ]]; then
+            release_flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/*.zip --title "Python Support $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" "${release_flags[@]}"

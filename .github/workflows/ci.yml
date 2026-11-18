@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build all 6 platform archives
+        run: node scripts/package.mjs
+      - name: Verify release archives
+        run: node --test --test-timeout=60000 scripts/package/*.test.mjs
+      - name: Validate against Lithe Store rules
+        run: |
+          git clone --depth 1 https://github.com/Lithe-IDEA/Lithe-store "$RUNNER_TEMP/store"
+          node --input-type=module -e "
+            import { readPackageManifests, checkManifest } from '$RUNNER_TEMP/store/scripts/validate-index.mjs';
+            import { readdirSync, readFileSync } from 'node:fs';
+            const manifest = JSON.parse(readFileSync('io.github.lithe-idea.python-support/plugin.json', 'utf8'));
+            const entry = { id: manifest.id };
+            let failed = false;
+            for (const name of readdirSync('dist').filter((n) => n.endsWith('.zip'))) {
+              const { manifests, unsafe } = readPackageManifests('dist/' + name, entry.id);
+              const problems = [...unsafe, ...checkManifest(manifests, entry, manifest)];
+              for (const problem of problems) { console.error(name + ': ' + problem); failed = true; }
+            }
+            process.exit(failed ? 1 : 0);
+          "
+      - name: Upload built platform archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-support-archives
+          path: dist/python-support-*.zip
+          if-no-files-found: error
+
+  commands:
+    needs: package
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: macos-latest
+            platform: darwin-arm64
+          - os: windows-latest
+            platform: windows-x64
+          - os: windows-11-arm
+            platform: windows-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-support-archives
+          path: dist
+      - name: Unpack Windows archive under a path with spaces
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem "dist\python-support-*-${{ matrix.platform }}.zip" | Select-Object -First 1
+          $plugins = Join-Path $env:RUNNER_TEMP "Lithe Plugins"
+          Expand-Archive -Path $archive.FullName -DestinationPath $plugins
+          "LITHE_TEST_PLUGIN_DIR=$plugins\io.github.lithe-idea.python-support" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Run contract, model, pyrefly, debugpy, and immutability tests
+        run: |
+          python --version || python3 --version
+          node scripts/test.mjs

@@ -1,0 +1,14 @@
+{
+  "repository": "https://github.com/1lck/Lithe-IDEA.git",
+  "revision": "7c8d0b88d5f622ea6ec425c22f723a6189cb2b04",
+  "packages": {
+    "./internal/projectgen": "^TestPythonPlugin",
+    "./internal/workbench": "^TestPythonSupportPlugin"
+  },
+  "requiredEnvironment": {
+    "LITHE_TEST_PYTHON_PLUGIN_ARCHIVE": "python-support-<version>-<platform>.zip to install, for example dist/python-support-0.1.0-darwin-arm64.zip"
+  },
+  "repositoryEnvironment": {
+    "LITHE_PLUGIN_PYTHON_DIR": "io.github.lithe-idea.python-support"
+  }
+}

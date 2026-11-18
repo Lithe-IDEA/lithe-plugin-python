@@ -1,0 +1,969 @@
+{
+  "schemaVersion": 0,
+  "id": "io.github.lithe-idea.python-support",
+  "displayName": "Python Support",
+  "version": "0.1.0",
+  "vendor": {
+    "id": "io.github.lithe-idea",
+    "displayName": "Lithe Community",
+    "signatureRequirement": "none"
+  },
+  "repository": "https://github.com/Lithe-IDEA/lithe-plugin-python",
+  "pluginAPIVersion": 0,
+  "requires": {
+    "buildSystems": 0,
+    "debugAdapters": 0,
+    "languageServers": 0,
+    "languages": 0,
+    "outputLinkMatchers": 0,
+    "projectGenerators": 0,
+    "settings": 0,
+    "toolDefinitions": 0
+  },
+  "requiresTools": ["python"],
+  "permissions": [
+    "debug.attach",
+    "debug.launch",
+    "languageServer.launch",
+    "process.build",
+    "project.generate"
+  ],
+  "activationEvents": [
+    "onBuildSystem:conda",
+    "onBuildSystem:python",
+    "onBuildSystem:ruff",
+    "onBuildSystem:uv",
+    "onDebug:debugpy",
+    "onLanguage:python"
+  ],
+  "languages": [
+    {
+      "id": "python",
+      "displayName": "Python",
+      "fileExtensions": ["py", "pyi", "pyw"],
+      "projectFileNames": [
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "requirements.txt",
+        "Pipfile",
+        "pyrefly.toml"
+      ],
+      "dependencies": {
+        "managementFileNames": [
+          "pyproject.toml",
+          "uv.lock",
+          "requirements.txt",
+          "setup.py",
+          "setup.cfg",
+          "Pipfile",
+          "Pipfile.lock",
+          "environment.yml",
+          "environment.yaml"
+        ],
+        "projectDependencyPaths": [".venv", "venv"]
+      },
+      "configuration": {
+        "lineComment": "#",
+        "brackets": [
+          ["{", "}"],
+          ["[", "]"],
+          ["(", ")"]
+        ],
+        "autoClosingPairs": [
+          ["{", "}"],
+          ["[", "]"],
+          ["(", ")"],
+          ["\"", "\""],
+          ["'", "'"]
+        ]
+      }
+    }
+  ],
+  "settings": [
+    {
+      "id": "pythonExecutable",
+      "type": "file",
+      "title": "Python executable override",
+      "description": "Explicit path to the Python interpreter for build, run, and pytest commands. Leave empty to resolve automatically from the Python toolchain (.venv, venv, VIRTUAL_ENV, PATH, or discovered installations).",
+      "default": "",
+      "effect": "reload",
+      "page": { "buildSystemID": "python" },
+      "section": "Python Interpreter"
+    },
+    {
+      "id": "typeCheckingMode",
+      "type": "enum",
+      "title": "Type checking mode",
+      "description": "Controls Pyrefly's type-checking strictness. Choose auto to enable type checking only in projects with pyrefly.toml or [tool.pyrefly].",
+      "default": "default",
+      "options": [
+        { "value": "default", "title": "Default" },
+        { "value": "auto", "title": "Automatic (configured projects only)" },
+        { "value": "basic", "title": "Basic" },
+        { "value": "strict", "title": "Strict" },
+        { "value": "all", "title": "All" },
+        { "value": "off", "title": "Off" }
+      ],
+      "effect": "immediate",
+      "page": { "languageID": "python" },
+      "section": "Pyrefly"
+    },
+    {
+      "id": "displayTypeErrors",
+      "type": "enum",
+      "title": "Display type errors",
+      "description": "Whether Pyrefly publishes type errors in editor diagnostics across all files, only in projects with a Pyrefly config, or limits diagnostics to missing imports.",
+      "default": "force-on",
+      "options": [
+        { "value": "force-on", "title": "Always on" },
+        { "value": "default", "title": "Configured projects only" },
+        { "value": "error-missing-imports", "title": "Missing imports only" },
+        { "value": "force-off", "title": "Off" }
+      ],
+      "effect": "immediate",
+      "page": { "languageID": "python" },
+      "section": "Pyrefly"
+    },
+    {
+      "id": "diagnosticMode",
+      "type": "enum",
+      "title": "Diagnostic scope",
+      "description": "Analyze only open Python files or the entire workspace.",
+      "default": "openFilesOnly",
+      "options": [
+        { "value": "openFilesOnly", "title": "Open files only" },
+        { "value": "workspace", "title": "Entire workspace" }
+      ],
+      "effect": "immediate",
+      "page": { "languageID": "python" },
+      "section": "Pyrefly"
+    },
+    {
+      "id": "autoImportCompletions",
+      "type": "boolean",
+      "title": "Auto-import completions",
+      "description": "Include symbols from unimported modules in code completion and insert the import statement on accept.",
+      "default": true,
+      "effect": "immediate",
+      "page": { "languageID": "python" },
+      "section": "Completions"
+    },
+    {
+      "id": "completeFunctionParens",
+      "type": "boolean",
+      "title": "Complete function parentheses",
+      "description": "Automatically append parentheses when completing a Python function or method call.",
+      "default": false,
+      "effect": "immediate",
+      "page": { "languageID": "python" },
+      "section": "Completions"
+    },
+    {
+      "id": "importFormat",
+      "type": "enum",
+      "title": "Auto-import module path style",
+      "description": "Prefer absolute module paths or package-relative imports when Pyrefly inserts imports.",
+      "default": "absolute",
+      "options": [
+        { "value": "absolute", "title": "Absolute" },
+        { "value": "relative", "title": "Relative" }
+      ],
+      "effect": "immediate",
+      "page": { "languageID": "python" },
+      "section": "Completions"
+    }
+  ],
+  "languageServers": [
+    {
+      "languageID": "python",
+      "languageIdentifier": "python",
+      "launch": {
+        "kind": "packaged",
+        "path": "bin/pyrefly"
+      },
+      "arguments": ["lsp"],
+      "validationArguments": ["--version"],
+      "workspaceConfiguration": {
+        "python": {
+          "pyrefly": {
+            "typeCheckingMode": "${setting:typeCheckingMode}",
+            "displayTypeErrors": "${setting:displayTypeErrors}",
+            "diagnosticMode": "${setting:diagnosticMode}"
+          },
+          "analysis": {
+            "diagnosticMode": "${setting:diagnosticMode}",
+            "autoImportCompletions": "${setting:autoImportCompletions}",
+            "completeFunctionParens": "${setting:completeFunctionParens}",
+            "importFormat": "${setting:importFormat}"
+          }
+        }
+      },
+      "indexingExclusions": {
+        "section": "python.pyrefly.extraProjectExcludes",
+        "entry": "${path}/**",
+        "rootEntry": "**",
+        "default": [],
+        "pathSyntax": "glob"
+      }
+    }
+  ],
+  "toolDefinitions": [
+    {
+      "id": "python",
+      "displayName": "Python",
+      "icon": { "path": "icons/python.svg" },
+      "executableLayouts": [
+        { "path": "bin/python3", "platforms": ["macos", "linux"] },
+        { "path": "bin/python", "platforms": ["macos", "linux"] },
+        { "path": "Scripts/python.exe", "platforms": ["windows"] },
+        { "path": "python.exe", "platforms": ["windows"] }
+      ],
+      "discovery": [
+        {
+          "root": { "kind": "absolute", "path": "/opt/homebrew/opt" },
+          "pattern": "python@*/libexec",
+          "platforms": ["macos"]
+        },
+        {
+          "root": { "kind": "absolute", "path": "/usr/local/opt" },
+          "pattern": "python@*/libexec",
+          "platforms": ["macos"]
+        },
+        {
+          "root": { "kind": "absolute", "path": "/Library/Frameworks/Python.framework/Versions" },
+          "pattern": "*",
+          "platforms": ["macos"]
+        },
+        {
+          "root": { "kind": "absolute", "path": "/" },
+          "pattern": "usr",
+          "platforms": ["linux"]
+        },
+        {
+          "root": { "kind": "absolute", "path": "/usr" },
+          "pattern": "local",
+          "platforms": ["linux"]
+        },
+        {
+          "root": { "kind": "environment", "variable": "LOCALAPPDATA" },
+          "pattern": "Programs/Python/*",
+          "platforms": ["windows"]
+        },
+        {
+          "root": { "kind": "home" },
+          "pattern": ".pyenv/versions/*",
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "root": { "kind": "home" },
+          "pattern": ".pyenv/pyenv-win/versions/*",
+          "platforms": ["windows"]
+        },
+        {
+          "root": { "kind": "home" },
+          "pattern": ".local/share/uv/python/*",
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "root": { "kind": "environment", "variable": "APPDATA" },
+          "pattern": "uv/data/python/*",
+          "platforms": ["windows"]
+        },
+        {
+          "root": { "kind": "home" },
+          "pattern": "*conda*"
+        },
+        {
+          "root": { "kind": "home" },
+          "pattern": "*conda*/envs/*"
+        },
+        {
+          "root": { "kind": "home" },
+          "pattern": "miniforge*"
+        },
+        {
+          "root": { "kind": "home" },
+          "pattern": "miniforge*/envs/*"
+        },
+        {
+          "root": { "kind": "absolute", "path": "/opt" },
+          "pattern": "*conda*",
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "root": { "kind": "absolute", "path": "/opt" },
+          "pattern": "*conda*/envs/*",
+          "platforms": ["macos", "linux"]
+        }
+      ],
+      "commands": ["python3", "python"],
+      "homeVariable": "VIRTUAL_ENV",
+      "version": {
+        "arguments": ["--version"],
+        "pattern": "Python (\\d+(?:\\.\\d+)*)"
+      },
+      "exports": [
+        { "name": "PYTHON_EXECUTABLE", "value": "${executable}" }
+      ],
+      "launch": [
+        "${executable}",
+        "${runtimeArguments}",
+        "${entry}",
+        "${arguments}"
+      ],
+      "executables": [
+        {
+          "id": "pinned",
+          "kind": "setting",
+          "settingID": "executable",
+          "layer": "project"
+        },
+        {
+          "id": "dot-venv-python3",
+          "kind": "projectFile",
+          "path": ".venv/bin/python3",
+          "home": ".venv",
+          "projectKind": "environment",
+          "requires": [".venv/pyvenv.cfg"],
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "id": "dot-venv-python",
+          "kind": "projectFile",
+          "path": ".venv/bin/python",
+          "home": ".venv",
+          "projectKind": "environment",
+          "requires": [".venv/pyvenv.cfg"],
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "id": "dot-venv-windows",
+          "kind": "projectFile",
+          "path": ".venv/Scripts/python.exe",
+          "home": ".venv",
+          "projectKind": "environment",
+          "requires": [".venv/pyvenv.cfg"],
+          "platforms": ["windows"]
+        },
+        {
+          "id": "venv-python3",
+          "kind": "projectFile",
+          "path": "venv/bin/python3",
+          "home": "venv",
+          "projectKind": "environment",
+          "requires": ["venv/pyvenv.cfg"],
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "id": "venv-python",
+          "kind": "projectFile",
+          "path": "venv/bin/python",
+          "home": "venv",
+          "projectKind": "environment",
+          "requires": ["venv/pyvenv.cfg"],
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "id": "venv-windows",
+          "kind": "projectFile",
+          "path": "venv/Scripts/python.exe",
+          "home": "venv",
+          "projectKind": "environment",
+          "requires": ["venv/pyvenv.cfg"],
+          "platforms": ["windows"]
+        },
+        {
+          "id": "project-request",
+          "kind": "toolchain",
+          "scope": "project"
+        },
+        {
+          "id": "default",
+          "kind": "setting",
+          "settingID": "executable",
+          "layer": "global"
+        },
+        {
+          "id": "global-request",
+          "kind": "toolchain",
+          "scope": "global"
+        },
+        {
+          "id": "virtual-env-python3",
+          "kind": "environment",
+          "variable": "VIRTUAL_ENV",
+          "path": "bin/python3",
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "id": "virtual-env-python",
+          "kind": "environment",
+          "variable": "VIRTUAL_ENV",
+          "path": "bin/python",
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "id": "virtual-env-windows",
+          "kind": "environment",
+          "variable": "VIRTUAL_ENV",
+          "path": "Scripts/python.exe",
+          "platforms": ["windows"]
+        },
+        {
+          "id": "path-python3",
+          "kind": "command",
+          "command": "python3",
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "id": "path-python",
+          "kind": "command",
+          "command": "python"
+        },
+        {
+          "id": "detected",
+          "kind": "toolchain",
+          "scope": "installed"
+        }
+      ]
+    }
+  ],
+  "buildSystems": [
+    {
+      "id": "python",
+      "displayName": "Python",
+      "icon": { "path": "icons/python.svg" },
+      "detection": {
+        "markers": ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"]
+      },
+      "invocation": {
+        "executables": [
+          { "kind": "setting", "settingID": "pythonExecutable" },
+          { "kind": "toolchain", "toolchainID": "python" }
+        ],
+        "version": {
+          "arguments": ["--version"],
+          "pattern": "Python (\\d+(?:\\.\\d+)*)"
+        },
+        "minimumVersion": "3.9"
+      },
+      "model": {
+        "source": "command",
+        "arguments": [
+          "-I",
+          "-B",
+          "${pluginDir}/scripts/build_model.py",
+          "${root}",
+          "${outputFile}"
+        ],
+        "output": "outputFile",
+        "decoder": "litheBuildModel",
+        "executesProjectCode": false,
+        "mayUseNetwork": false
+      },
+      "tasks": [
+        {
+          "id": "pip-install-requirements",
+          "displayName": "pip install -r requirements.txt",
+          "description": "Install dependencies from requirements.txt into the selected Python interpreter.",
+          "group": "build",
+          "scopes": ["workspace", "project"],
+          "arguments": [
+            "-m",
+            "pip",
+            "install",
+            "-r",
+            "requirements.txt",
+            "${optionArguments}",
+            "${userArguments}"
+          ]
+        },
+        {
+          "id": "mypy",
+          "displayName": "mypy",
+          "description": "Run static type checking with mypy in the selected Python environment.",
+          "group": "verification",
+          "scopes": ["workspace", "project"],
+          "arguments": [
+            "-m",
+            "mypy",
+            "--show-column-numbers",
+            ".",
+            "${optionArguments}",
+            "${userArguments}"
+          ]
+        }
+      ],
+      "run": [
+        {
+          "id": "script",
+          "fromTargets": { "tags": ["script"] },
+          "execution": "application",
+          "arguments": [
+            "${target.property:script}",
+            "${optionArguments}",
+            "${userArguments}"
+          ]
+        },
+        {
+          "id": "module",
+          "fromTargets": { "tags": ["module"] },
+          "execution": "application",
+          "arguments": [
+            "-m",
+            "${target.property:module}",
+            "${optionArguments}",
+            "${userArguments}"
+          ]
+        },
+        {
+          "id": "entrypoint",
+          "fromTargets": { "tags": ["entrypoint"] },
+          "execution": "application",
+          "arguments": [
+            "-c",
+            "${target.property:runner}",
+            "${optionArguments}",
+            "${userArguments}"
+          ]
+        },
+        {
+          "id": "django",
+          "fromTargets": { "tags": ["django"] },
+          "execution": "service",
+          "arguments": [
+            "${target.property:script}",
+            "runserver",
+            "${optionArguments}",
+            "${userArguments}"
+          ]
+        },
+        {
+          "id": "asgi",
+          "fromTargets": { "tags": ["asgi"] },
+          "execution": "service",
+          "arguments": [
+            "-m",
+            "uvicorn",
+            "--app-dir",
+            "${target.property:appDir}",
+            "${target.property:app}",
+            "--reload",
+            "${optionArguments}",
+            "${userArguments}"
+          ]
+        },
+        {
+          "id": "asgi-factory",
+          "fromTargets": { "tags": ["asgifactory"] },
+          "execution": "service",
+          "arguments": [
+            "-m",
+            "uvicorn",
+            "--app-dir",
+            "${target.property:appDir}",
+            "--factory",
+            "${target.property:app}",
+            "--reload",
+            "${optionArguments}",
+            "${userArguments}"
+          ]
+        },
+        {
+          "id": "wsgi",
+          "fromTargets": { "tags": ["wsgi"] },
+          "execution": "service",
+          "arguments": [
+            "-m",
+            "flask",
+            "--app",
+            "${target.property:app}",
+            "run",
+            "--reload",
+            "${optionArguments}",
+            "${userArguments}"
+          ]
+        }
+      ],
+      "test": {
+        "scopes": ["workspace", "project", "target"],
+        "targetTags": ["test"],
+        "filters": ["suite", "case"],
+        "arguments": [
+          "-m",
+          "pytest",
+          "--junitxml=.pytest_cache/lithe-junit.xml",
+          {
+            "value": "${target.property:directory}",
+            "when": ["targetSelected", "noSuiteSelected"]
+          },
+          {
+            "value": "${test.suite}",
+            "when": "suiteSelected"
+          },
+          {
+            "value": "-k",
+            "when": "caseSelected"
+          },
+          {
+            "value": "${test.case}",
+            "when": "caseSelected"
+          },
+          "${optionArguments}",
+          "${userArguments}"
+        ],
+        "results": {
+          "decoder": "junitXml",
+          "reports": [".pytest_cache/lithe-junit.xml"]
+        }
+      },
+      "diagnostics": {
+        "decoder": "lineMatcher",
+        "patterns": [
+          {
+            "regex": "^([^:\\r\\n]+\\.pyi?):(\\d+):(?:(\\d+):)?\\s*(error|warning|note):\\s*(.+)$",
+            "file": 1,
+            "line": 2,
+            "column": 3,
+            "severity": 4,
+            "message": 5,
+            "severities": {
+              "error": "error",
+              "warning": "warning",
+              "note": "information"
+            },
+            "defaultSeverity": "error"
+          }
+        ]
+      },
+      "sync": {
+        "watch": ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"]
+      },
+      "layout": {
+        "excluded": [".venv", "venv"],
+        "hiddenDirectoryNames": [
+          "__pycache__",
+          ".mypy_cache",
+          ".pytest_cache",
+          ".ruff_cache"
+        ]
+      }
+    },
+    {
+      "id": "uv",
+      "displayName": "uv",
+      "detection": {
+        "markers": ["uv.lock"]
+      },
+      "invocation": {
+        "executables": [
+          { "kind": "command", "command": "uv" }
+        ],
+        "version": {
+          "arguments": ["--version"],
+          "pattern": "uv (\\d+(?:\\.\\d+)*)"
+        }
+      },
+      "tasks": [
+        {
+          "id": "sync",
+          "displayName": "uv sync",
+          "description": "Synchronize the project's virtual environment with uv.lock.",
+          "group": "build",
+          "scopes": ["workspace", "project"],
+          "arguments": ["sync", "${optionArguments}", "${userArguments}"]
+        },
+        {
+          "id": "lock",
+          "displayName": "uv lock",
+          "description": "Resolve and update uv.lock without modifying the environment.",
+          "group": "lifecycle",
+          "scopes": ["workspace", "project"],
+          "arguments": ["lock", "${optionArguments}", "${userArguments}"]
+        }
+      ],
+      "sync": {
+        "watch": ["pyproject.toml", "uv.lock"]
+      }
+    },
+    {
+      "id": "conda",
+      "displayName": "Conda",
+      "detection": {
+        "markers": ["environment.yml", "environment.yaml"]
+      },
+      "invocation": {
+        "executables": [
+          { "kind": "command", "command": "conda" }
+        ],
+        "version": {
+          "arguments": ["--version"],
+          "pattern": "conda (\\d+(?:\\.\\d+)*)"
+        }
+      },
+      "tasks": [
+        {
+          "id": "env-update",
+          "displayName": "conda env update",
+          "description": "Update the Conda environment from environment.yml and prune removed packages.",
+          "group": "build",
+          "scopes": ["workspace", "project"],
+          "arguments": [
+            "env",
+            "update",
+            "--file",
+            "environment.yml",
+            "--prune",
+            "${optionArguments}",
+            "${userArguments}"
+          ]
+        }
+      ],
+      "sync": {
+        "watch": ["environment.yml", "environment.yaml"]
+      }
+    },
+    {
+      "id": "ruff",
+      "displayName": "Ruff",
+      "detection": {
+        "markers": ["ruff.toml", ".ruff.toml", "pyproject.toml"]
+      },
+      "invocation": {
+        "executables": [
+          { "kind": "command", "command": "ruff" }
+        ],
+        "version": {
+          "arguments": ["--version"],
+          "pattern": "ruff (\\d+(?:\\.\\d+)*)"
+        }
+      },
+      "tasks": [
+        {
+          "id": "check",
+          "displayName": "ruff check",
+          "description": "Run Ruff lint checks across the project.",
+          "group": "verification",
+          "scopes": ["workspace", "project"],
+          "arguments": [
+            "check",
+            "--output-format=concise",
+            ".",
+            "${optionArguments}",
+            "${userArguments}"
+          ]
+        },
+        {
+          "id": "format",
+          "displayName": "ruff format",
+          "description": "Format Python source files in the project with Ruff.",
+          "group": "other",
+          "scopes": ["workspace", "project"],
+          "arguments": [
+            "format",
+            ".",
+            "${optionArguments}",
+            "${userArguments}"
+          ]
+        }
+      ],
+      "diagnostics": {
+        "decoder": "lineMatcher",
+        "patterns": [
+          {
+            "regex": "^([^:\\r\\n]+\\.pyi?):(\\d+):(\\d+):\\s*([A-Z]+\\d+\\s+.+)$",
+            "file": 1,
+            "line": 2,
+            "column": 3,
+            "message": 4,
+            "defaultSeverity": "warning"
+          }
+        ]
+      },
+      "sync": {
+        "watch": ["ruff.toml", ".ruff.toml", "pyproject.toml"]
+      }
+    }
+  ],
+  "debugAdapters": [
+    {
+      "id": "debugpy",
+      "displayName": "Python (debugpy)",
+      "adapterID": "debugpy",
+      "requests": ["launch", "attach"],
+      "selectors": [
+        { "targetKinds": ["file"], "languageIDs": ["python"] },
+        { "targetKinds": ["connection"], "languageIDs": ["python"] }
+      ],
+      "configurationTypes": ["debugpy", "python"],
+      "launch": {
+        "process": {
+          "launch": {
+            "kind": "runtime",
+            "tool": "python",
+            "minimumVersion": "3.9",
+            "runtimeArguments": ["-E", "-s", "-B"],
+            "entry": "vendor/debugpy/adapter/__main__.py"
+          },
+          "arguments": ["--log-dir", "${logDir}"]
+        },
+        "transport": "stdio"
+      },
+      "configurations": {
+        "launch": {
+          "arguments": {
+            "console": "internalConsole",
+            "justMyCode": true,
+            "env": {
+              "PYTHONDONTWRITEBYTECODE": "1"
+            }
+          },
+          "targetBindings": {
+            "program": "target.path",
+            "cwd": "target.workingDirectory",
+            "args": "target.arguments",
+            "env": "target.environment"
+          }
+        },
+        "attach": {
+          "arguments": {
+            "justMyCode": true
+          },
+          "targetBindings": {
+            "connection": {
+              "host": "connect.host",
+              "port": "connect.port",
+              "pathMappings": {
+                "shape": "objects",
+                "argument": "pathMappings",
+                "localKey": "localRoot",
+                "remoteKey": "remoteRoot"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "outputLinkMatchers": [
+    {
+      "id": "python-traceback",
+      "pattern": "File \"(?P<path>[^\"]+)\", line (?P<line>\\d+)"
+    }
+  ],
+  "projectGenerators": [
+    {
+      "id": "python-project",
+      "displayName": "Python",
+      "description": "Create a Python project with pyproject.toml and an optional virtual environment.",
+      "section": "project",
+      "icon": { "path": "icons/python-project.svg" },
+      "order": 25,
+      "requirements": [
+        { "languageID": "python" },
+        { "buildSystemID": "python" }
+      ],
+      "fields": [
+        {
+          "id": "python",
+          "type": "tool",
+          "tool": "python",
+          "minimumVersion": "3.9",
+          "pinAs": "project",
+          "optional": true,
+          "title": "Python interpreter",
+          "description": "Python installation to pin for this project and use when creating a virtual environment."
+        },
+        {
+          "id": "environment",
+          "type": "enum",
+          "title": "Project environment",
+          "description": "Choose whether to create a .venv virtual environment with stdlib venv or uv.",
+          "default": "venv",
+          "presentation": "segmented",
+          "options": [
+            { "value": "none", "title": "None" },
+            { "value": "venv", "title": "venv (.venv)" },
+            { "value": "uv", "title": "uv (.venv)" }
+          ]
+        },
+        {
+          "id": "addSampleCode",
+          "type": "boolean",
+          "title": "Add sample code",
+          "description": "Generate a starter main.py script.",
+          "default": true
+        }
+      ],
+      "steps": [
+        {
+          "kind": "files",
+          "source": "templates/python/project"
+        },
+        {
+          "kind": "files",
+          "source": "templates/python/sample",
+          "when": { "field": "addSampleCode", "equals": true }
+        },
+        {
+          "kind": "command",
+          "command": "python3",
+          "arguments": [
+            "-I",
+            "-B",
+            "-c",
+            "import subprocess, sys; subprocess.check_call([sys.argv[1], '-m', 'venv', '.venv'])",
+            "${field.python.executable}"
+          ],
+          "mayUseNetwork": false,
+          "timeoutSeconds": 120,
+          "when": [
+            { "field": "environment", "equals": "venv" },
+            { "field": "python", "notEquals": "" }
+          ]
+        },
+        {
+          "kind": "command",
+          "command": "python3",
+          "arguments": ["-m", "venv", ".venv"],
+          "mayUseNetwork": false,
+          "timeoutSeconds": 120,
+          "when": [
+            { "field": "environment", "equals": "venv" },
+            { "field": "python", "equals": "" }
+          ]
+        },
+        {
+          "kind": "command",
+          "command": "uv",
+          "arguments": [
+            "venv",
+            {
+              "value": "--python",
+              "when": { "field": "python", "notEquals": "" }
+            },
+            {
+              "value": "${field.python.executable}",
+              "when": { "field": "python", "notEquals": "" }
+            },
+            ".venv"
+          ],
+          "mayUseNetwork": false,
+          "timeoutSeconds": 120,
+          "when": { "field": "environment", "equals": "uv" }
+        }
+      ],
+      "openFiles": [
+        {
+          "path": "main.py",
+          "when": { "field": "addSampleCode", "equals": true }
+        },
+        {
+          "path": "pyproject.toml",
+          "when": { "field": "addSampleCode", "equals": false }
+        }
+      ]
+    }
+  ]
+}

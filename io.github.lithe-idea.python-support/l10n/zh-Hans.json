@@ -1,0 +1,60 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Lithe-IDEA/Lithe-core-rust/main/shared/plugins/contract/v1/plugin-l10n.schema.json",
+  "settings": {
+    "pythonExecutable": {
+      "title": "Python 解释器覆盖路径",
+      "description": "显式指定用于构建、运行和 pytest 测试的 Python 解释器路径。留空时自动使用 Python 工具链解析结果（依次查找 .venv、venv、VIRTUAL_ENV、PATH 与已发现安装）。"
+    },
+    "typeCheckingMode": {
+      "title": "类型检查模式",
+      "description": "控制 Pyrefly 类型检查的严格程度；选择“自动”时遵循项目中的 pyrefly.toml 或 pyproject.toml 中的 [tool.pyrefly] 配置。",
+      "options": {
+        "auto": "自动（遵循项目配置）",
+        "off": "关闭",
+        "basic": "基础",
+        "default": "默认",
+        "strict": "严格",
+        "all": "全部规则"
+      }
+    },
+    "displayTypeErrors": {
+      "title": "显示类型错误",
+      "description": "控制 Pyrefly 在所有文件中展示类型错误、仅在含 Pyrefly 配置的项目中展示，或仅报告缺失导入。",
+      "options": {
+        "force-on": "始终开启",
+        "default": "仅已配置项目",
+        "error-missing-imports": "仅报告缺失导入",
+        "force-off": "关闭"
+      }
+    },
+    "diagnosticMode": {
+      "title": "诊断范围",
+      "description": "仅对已打开的 Python 文件运行诊断，或分析整个工作区。",
+      "options": {
+        "openFilesOnly": "仅打开的文件",
+        "workspace": "整个工作区"
+      }
+    },
+    "autoImportCompletions": {
+      "title": "自动导入补全",
+      "description": "在代码补全中包含尚未导入模块的符号，并在确认补全时自动插入 import 语句。"
+    },
+    "completeFunctionParens": {
+      "title": "补全函数括号",
+      "description": "补全 Python 函数或方法调用时自动补齐圆括号。"
+    },
+    "importFormat": {
+      "title": "自动导入路径风格",
+      "description": "控制 Pyrefly 自动插入导入语句时优先使用绝对模块路径还是包内相对路径。",
+      "options": {
+        "absolute": "绝对导入",
+        "relative": "相对导入"
+      }
+    }
+  },
+  "sections": {
+    "Python Interpreter": "Python 解释器",
+    "Pyrefly": "Pyrefly",
+    "Completions": "代码补全"
+  }
+}
