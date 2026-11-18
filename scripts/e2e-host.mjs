@@ -7,16 +7,52 @@
 // .artifacts/lithe-host (desktop/ and scripts/ only), copies e2e/host/desktop/<path> into
 // that checkout, and runs scripts/desktop/desktop-go.sh test against real Rust Core.
 
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
 import { copyFile, mkdir, readdir, readFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const tests = join(root, "e2e", "host");
 const work = join(root, ".artifacts", "lithe-host");
+
+function ensureToolchainsOnPath() {
+  const extraDirs = [];
+  const cargoBin = join(homedir(), ".cargo", "bin");
+  if (existsSync(cargoBin)) extraDirs.push(cargoBin);
+  if (process.platform === "darwin" && existsSync("/opt/homebrew/opt/rustup/bin")) {
+    extraDirs.push("/opt/homebrew/opt/rustup/bin");
+  }
+  if (process.platform === "darwin" && existsSync("/opt/homebrew/bin")) {
+    extraDirs.push("/opt/homebrew/bin");
+  }
+  const probe = spawnSync(process.platform === "win32" ? "where" : "which", ["go"], { stdio: "ignore" });
+  if (probe.status !== 0) {
+    const modDir = join(homedir(), "go", "pkg", "mod", "golang.org");
+    if (existsSync(modDir)) {
+      const goArch = process.arch === "x64" ? "amd64" : process.arch;
+      const suffix = `.${process.platform}-${goArch}`;
+      const matches = readdirSync(modDir)
+        .filter((name) => name.startsWith("toolchain@") && name.endsWith(suffix))
+        .sort()
+        .reverse();
+      for (const name of matches) {
+        const binDir = join(modDir, name, "bin");
+        const goExe = join(binDir, process.platform === "win32" ? "go.exe" : "go");
+        if (existsSync(goExe)) {
+          extraDirs.push(binDir);
+          break;
+        }
+      }
+    }
+  }
+  if (extraDirs.length > 0) {
+    process.env.PATH = [...extraDirs, process.env.PATH ?? ""].filter(Boolean).join(delimiter);
+  }
+}
 
 function detectHostPlatform() {
   const osPart =
@@ -42,6 +78,18 @@ function run(command, args, options = {}) {
   });
 }
 
+async function hasCommitLocally(dir, ref) {
+  if (!/^[0-9a-f]{40}$/i.test(ref) || !existsSync(join(dir, ".git"))) {
+    return false;
+  }
+  try {
+    await run("git", ["-C", dir, "cat-file", "-e", `${ref}^{commit}`], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function hostTestFiles(directory = join(tests, "desktop")) {
   const files = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -52,12 +100,20 @@ async function hostTestFiles(directory = join(tests, "desktop")) {
   return files;
 }
 
-async function checkoutHost(source, ref) {
+async function checkoutHost(source, ref, isRemoteUrl, explicitSource) {
   await mkdir(work, { recursive: true });
   await run("git", ["init", "-q", work]);
   await run("git", ["-C", work, "sparse-checkout", "set", "--cone", "desktop", "scripts"]);
+  if (!explicitSource && (await hasCommitLocally(work, ref))) {
+    await run("git", ["-C", work, "checkout", "-q", "--force", "--detach", ref]);
+    await run("git", ["-C", work, "clean", "-q", "-f", "-d", "--", "desktop"]);
+    return;
+  }
   await run("git", ["-C", work, "config", "remote.origin.url", source]);
-  await run("git", ["-C", work, "fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", ref]);
+  const fetchArgs = isRemoteUrl
+    ? ["-C", work, "fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", ref]
+    : ["-C", work, "fetch", "-q", "--depth", "1", "origin", ref];
+  await run("git", fetchArgs);
   await run("git", ["-C", work, "checkout", "-q", "--force", "--detach", "FETCH_HEAD"]);
   await run("git", ["-C", work, "clean", "-q", "-f", "-d", "--", "desktop"]);
 }
@@ -103,10 +159,11 @@ if (missing.length > 0) {
   );
 }
 
+ensureToolchainsOnPath();
 const given = values.source ?? pin.repository;
 const isRemoteUrl = /^[a-z]+:\/\//.test(given);
 const source = isRemoteUrl ? given : resolve(given);
-await checkoutHost(source, values.ref ?? pin.revision);
+await checkoutHost(source, values.ref ?? pin.revision, isRemoteUrl, Boolean(values.source));
 if (!isRemoteUrl) {
   await maybeSeedDesktopArtifacts(source);
 }

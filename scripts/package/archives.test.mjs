@@ -70,7 +70,11 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
       `${PACKAGE_ID}/LICENSE`,
       `${PACKAGE_ID}/THIRD-PARTY-NOTICES.txt`,
       `${PACKAGE_ID}/l10n/zh-Hans.json`,
+      `${PACKAGE_ID}/scripts/lithe_rpc.py`,
+      `${PACKAGE_ID}/scripts/backend.py`,
       `${PACKAGE_ID}/scripts/build_model.py`,
+      `${PACKAGE_ID}/scripts/build_provider.py`,
+      `${PACKAGE_ID}/scripts/toolchain_provider.py`,
       `${PACKAGE_ID}/scripts/debugpy_adapter.py`,
       `${PACKAGE_ID}/vendor/debugpy/adapter/__main__.py`,
       `${PACKAGE_ID}/vendor/debugpy/ThirdPartyNotices.txt`,
@@ -92,7 +96,13 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
 
     const isWindows = archive.platform.startsWith("windows-");
     const pyreflyServer = manifest.languageServers.find((s) => s.languageID === "python");
-    assert.equal(pyreflyServer.launch.path, isWindows ? "bin/pyrefly.exe" : "bin/pyrefly");
+    assert.deepEqual(pyreflyServer.launch, {
+      kind: "backend",
+      function: "pyrefly.resolveLaunch",
+      timeoutMilliseconds: 30000,
+    });
+    assert.equal("arguments" in pyreflyServer, false);
+    assert.equal("validationArguments" in pyreflyServer, false);
 
     const generator = manifest.projectGenerators.find((g) => g.id === "python-project");
     const venvCommands = generator.steps.filter((s) => s.kind === "command" && s.command !== "uv").map((s) => s.command);

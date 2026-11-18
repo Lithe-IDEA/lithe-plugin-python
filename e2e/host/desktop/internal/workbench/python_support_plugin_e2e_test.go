@@ -5,19 +5,24 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"maps"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/1lck/Lithe-IDEA/desktop/internal/buildprovider"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginbackend"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginhost"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/plugininstall"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginservice"
@@ -71,15 +76,6 @@ func toWindowsVariantManifest(t *testing.T, unixManifest []byte) []byte {
 	if err := json.Unmarshal(unixManifest, &doc); err != nil {
 		t.Fatal(err)
 	}
-	servers, _ := doc["languageServers"].([]any)
-	for _, rawServer := range servers {
-		srv, _ := rawServer.(map[string]any)
-		if srv["languageID"] == "python" {
-			if launch, ok := srv["launch"].(map[string]any); ok {
-				launch["path"] = "bin/pyrefly.exe"
-			}
-		}
-	}
 	generators, _ := doc["projectGenerators"].([]any)
 	for _, rawGen := range generators {
 		gen, _ := rawGen.(map[string]any)
@@ -98,6 +94,141 @@ func toWindowsVariantManifest(t *testing.T, unixManifest []byte) []byte {
 	return encoded
 }
 
+func pythonFileURI(path string) string {
+	slashed := filepath.ToSlash(path)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	return (&url.URL{Scheme: "file", Path: slashed}).String()
+}
+
+func hasPytestInstalled(ctx context.Context, pythonExec string, extraEnv map[string]string) bool {
+	if pythonExec == "" {
+		return false
+	}
+	cmd := exec.CommandContext(ctx, pythonExec, "-B", "-c", "import pytest")
+	cmd.Env = os.Environ()
+	for k, v := range extraEnv {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	return cmd.Run() == nil
+}
+
+// resolvePytestToolForE2E returns a Python executable + optional environment that can run pytest,
+// preferring systemPython, then local developer virtualenvs, and finally a tiny hermetic pytest module.
+func resolvePytestToolForE2E(t *testing.T, ctx context.Context, systemPython string) core.BuildTool {
+	t.Helper()
+	if hasPytestInstalled(ctx, systemPython, nil) {
+		return core.BuildTool{Executable: systemPython}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		entries, _ := os.ReadDir(home)
+		for _, entry := range entries {
+			name := entry.Name()
+			if strings.HasPrefix(name, ".venv") || strings.Contains(name, "conda") || strings.HasPrefix(name, "miniforge") {
+				cand := filepath.Join(home, name, "bin", "python3")
+				if runtime.GOOS == "windows" {
+					cand = filepath.Join(home, name, "Scripts", "python.exe")
+				}
+				if info, statErr := os.Stat(cand); statErr == nil && !info.IsDir() && hasPytestInstalled(ctx, cand, nil) {
+					return core.BuildTool{Executable: cand}
+				}
+			}
+		}
+	}
+
+	// Hermetic offline fallback so air-gapped hosts never require PyPI access.
+	shimDir := t.TempDir()
+	pkgDir := filepath.Join(shimDir, "pytest")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shimInit := `import importlib.util, inspect, pathlib, sys, xml.etree.ElementTree as ET
+class _Item:
+    def __init__(self, nodeid, path, name, fn):
+        self.nodeid, self.path, self.name, self.fn = nodeid, path, name, fn
+class _Config:
+    def __init__(self, rootpath):
+        self.rootpath = rootpath
+def _parametrize(argnames, argvalues):
+    names = [n.strip() for n in argnames.split(",")] if isinstance(argnames, str) else list(argnames)
+    def _deco(fn):
+        fn._parametrize = (names, list(argvalues))
+        return fn
+    return _deco
+class _Mark:
+    parametrize = staticmethod(_parametrize)
+mark = _Mark()
+def _discover(root):
+    items = []
+    for p in sorted(root.rglob("test_*.py")):
+        rel = p.relative_to(root).as_posix()
+        spec = importlib.util.spec_from_file_location(rel.replace("/", "_").replace(".py", ""), p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        for k, v in vars(mod).items():
+            if callable(v) and k.startswith("test_"):
+                prm = getattr(v, "_parametrize", None)
+                if prm:
+                    pnames, pvals = prm
+                    for row in pvals:
+                        vals = row if isinstance(row, (tuple, list)) else (row,)
+                        lbl = "-".join(str(x) for x in vals)
+                        kw = dict(zip(pnames, vals))
+                        items.append(_Item(f"{rel}::{k}[{lbl}]", p, f"{k}[{lbl}]", lambda fn=v, kw=kw: fn(**kw)))
+                else:
+                    items.append(_Item(f"{rel}::{k}", p, k, v))
+    return items
+def main(args=None, plugins=None):
+    argv = list(args or sys.argv[1:])
+    collect_only = "--collect-only" in argv
+    junit_xml = None
+    selectors = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--junitxml="):
+            junit_xml = a.split("=", 1)[1]
+        elif a in ("-o", "-k"):
+            i += 1
+        elif not a.startswith("-"):
+            selectors.append(a)
+        i += 1
+    cwd = pathlib.Path.cwd().resolve()
+    items = _discover(cwd)
+    if selectors:
+        items = [it for it in items if any(it.nodeid == s or it.nodeid.startswith(s + "::") for s in selectors)]
+    cfg = _Config(cwd)
+    for plug in (plugins or []):
+        if hasattr(plug, "pytest_collection_modifyitems"):
+            plug.pytest_collection_modifyitems(None, cfg, items)
+    if not items:
+        return 5
+    if collect_only:
+        return 0
+    suite_el = ET.Element("testsuite", name="pytest", tests=str(len(items)), failures="0")
+    for it in items:
+        cname = it.path.relative_to(cwd).with_suffix("").as_posix().replace("/", ".")
+        ET.SubElement(suite_el, "testcase", classname=cname, name=it.name, time="0.001")
+        it.fn()
+    if junit_xml:
+        out_p = cwd / junit_xml
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        ET.ElementTree(suite_el).write(out_p, encoding="utf-8", xml_declaration=True)
+    return 0
+`
+	if err := os.WriteFile(filepath.Join(pkgDir, "__init__.py"), []byte(shimInit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "__main__.py"), []byte("import pytest, sys\nraise SystemExit(pytest.main(sys.argv[1:]))\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return core.BuildTool{
+		Executable:  systemPython,
+		Environment: map[string]string{"PYTHONPATH": shimDir},
+	}
+}
+
 func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	archive := os.Getenv("LITHE_TEST_PYTHON_PLUGIN_ARCHIVE")
 	if archive == "" {
@@ -112,6 +243,9 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s not on PATH: %v", pythonCmd, err)
 	}
+	if resolvedSysPy, evalErr := filepath.EvalSymlinks(systemPython); evalErr == nil {
+		systemPython = resolvedSysPy
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -122,6 +256,9 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		service.Host.Stop(pythonSupportPluginID)
+	})
 
 	// 1. Real installer Prepare + Commit + Enable.
 	plan, err := service.Installer.Prepare(ctx, plugininstall.Request{
@@ -162,6 +299,37 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("Windows manifest rejected by pluginhost.Validate: %v", err)
 	}
 
+	// Wire runtime tool launch resolution and structured log capture on service.Backend.
+	registryInput, err := toolchain.RegistryInput([]json.RawMessage{normalizedManifest})
+	if err != nil {
+		t.Fatalf("toolchain.RegistryInput: %v", err)
+	}
+	var logMu sync.Mutex
+	var recordedEvents []string
+	service.Backend.SetLogFacts(func(_ core.LogLevel, event string, fields map[string]any) {
+		logMu.Lock()
+		op, _ := fields["operation"].(string)
+		recordedEvents = append(recordedEvents, fmt.Sprintf("%s:%s", event, op))
+		logMu.Unlock()
+	})
+	service.Backend.SetToolResolver(func(_ context.Context, _, _, tool string) (pluginbackend.ToolExecutable, error) {
+		if tool != "python" {
+			return pluginbackend.ToolExecutable{}, fmt.Errorf("unexpected tool %s", tool)
+		}
+		return pluginbackend.ToolExecutable{Path: systemPython}, nil
+	})
+	service.Backend.SetToolEntryResolver(func(callCtx context.Context, _, _ string, input pluginbackend.ToolEntryLaunch) (pluginbackend.ToolExecutable, error) {
+		launch, launchErr := kernel.InstantiateToolchainLaunch(callCtx, registryInput, input.Tool, systemPython, "", input.Entry, input.RuntimeArguments, input.Arguments)
+		if launchErr != nil {
+			return pluginbackend.ToolExecutable{}, launchErr
+		}
+		return pluginbackend.ToolExecutable{Path: launch.Executable, Arguments: launch.Arguments}, nil
+	})
+	sessionLogDir := t.TempDir()
+	service.LogDirectory = func(_ context.Context, _ string) string {
+		return sessionLogDir
+	}
+
 	// 3. Verify zh-Hans localization is accepted by Core settingsState without rejections.
 	zhBytes, err := os.ReadFile(filepath.Join(installedDir, "l10n", "zh-Hans.json"))
 	if err != nil {
@@ -181,38 +349,113 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("unexpected l10n rejections: %+v", settingsState.Localization.Rejected)
 	}
 
-	// 4. Plan language server (Pyrefly) and run --version against installed binary.
+	// 4. Plan backend-resolved language server (Pyrefly), call real backend.py pyrefly.resolveLaunch
+	// with and without tools.python.executable, decode via Core, and run pyrefly --version.
 	stateDir := t.TempDir()
-	logDir := t.TempDir()
-	lspPlan, err := kernel.PlanPluginLanguageServer(ctx, normalizedManifest, "python", core.PluginBackendDirectories{
-		PluginDirectory: installedDir,
-		StateDirectory:  stateDir,
-		LogDirectory:    logDir,
-		Architecture:    core.PluginArchitecture(),
-	})
+	wsStateDir := t.TempDir()
+	tempDir := t.TempDir()
+	lspDirs := core.PluginBackendDirectories{
+		PluginDirectory:         installedDir,
+		StateDirectory:          stateDir,
+		WorkspaceStateDirectory: wsStateDir,
+		LogDirectory:            sessionLogDir,
+		TemporaryDirectory:      tempDir,
+		Architecture:            core.PluginArchitecture(),
+	}
+	lspPlan, err := kernel.PlanPluginLanguageServer(ctx, normalizedManifest, "python", lspDirs)
 	if err != nil {
 		t.Fatalf("PlanPluginLanguageServer: %v", err)
 	}
-	pyreflyExec, err := pluginhost.ResolveExecutable(installedDir, lspPlan.Launch.Path)
-	if err != nil {
-		t.Fatalf("ResolveExecutable(%s): %v", lspPlan.Launch.Path, err)
+	if lspPlan.Launch.Kind != "backend" || lspPlan.Launch.Function != "pyrefly.resolveLaunch" {
+		t.Fatalf("expected backend-resolved pyrefly launch, got %+v", lspPlan.Launch)
 	}
-	verOut, err := exec.CommandContext(ctx, pyreflyExec, lspPlan.ValidationArguments...).CombinedOutput()
+
+	// 4a. Call pyrefly.resolveLaunch WITH tools.python.executable injected.
+	var resolveParamsWithTool map[string]any
+	if err := json.Unmarshal(lspPlan.ResolveParams, &resolveParamsWithTool); err != nil {
+		t.Fatal(err)
+	}
+	resolveParamsWithTool["tools"] = map[string]any{
+		"python": map[string]any{
+			"executable": systemPython,
+			"version":    "3.12.0",
+		},
+	}
+	encodedWithTool, err := json.Marshal(resolveParamsWithTool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxRef := json.RawMessage(`{"contextID":"ctx-e2e-1","generation":1}`)
+	answerWithTool, err := service.Host.Call(ctx, pythonSupportPluginID, lspPlan.Launch.Function, encodedWithTool, ctxRef, 30*time.Second)
+	if err != nil {
+		t.Fatalf("Host.Call(pyrefly.resolveLaunch with tool): %v", err)
+	}
+	decodedWithTool, err := kernel.DecodePluginLanguageServerLaunch(ctx, normalizedManifest, "python", lspDirs, answerWithTool)
+	if err != nil {
+		t.Fatalf("DecodePluginLanguageServerLaunch(with tool): %v", err)
+	}
+	expectedPyreflyRel := "bin/pyrefly"
+	if runtime.GOOS == "windows" {
+		expectedPyreflyRel = "bin/pyrefly.exe"
+	}
+	if decodedWithTool.Launch.Kind != "packaged" || decodedWithTool.Launch.Path != expectedPyreflyRel {
+		t.Fatalf("decoded launch = %+v, want packaged %s", decodedWithTool.Launch, expectedPyreflyRel)
+	}
+	if !slices.Equal(decodedWithTool.Arguments, []string{"lsp"}) {
+		t.Fatalf("decoded arguments = %v, want [lsp]", decodedWithTool.Arguments)
+	}
+	if !strings.Contains(string(decodedWithTool.WorkspaceConfiguration), `"pythonPath"`) {
+		t.Fatalf("expected pythonPath injected when tools.python is present, got %s", decodedWithTool.WorkspaceConfiguration)
+	}
+
+	pyreflyExec, err := pluginhost.ResolveExecutable(installedDir, decodedWithTool.Launch.Path)
+	if err != nil {
+		t.Fatalf("ResolveExecutable(%s): %v", decodedWithTool.Launch.Path, err)
+	}
+	verOut, err := exec.CommandContext(ctx, pyreflyExec, "--version").CombinedOutput()
 	if err != nil {
 		t.Fatalf("pyrefly --version failed: %v\n%s", err, verOut)
 	}
 	if !strings.Contains(strings.ToLower(string(verOut)), "pyrefly 1.4.1") {
 		t.Fatalf("unexpected pyrefly version output: %q", string(verOut))
 	}
-	if strings.Contains(string(lspPlan.WorkspaceConfiguration), `"pythonPath"`) {
-		t.Fatalf("workspaceConfiguration must not emit empty pythonPath: %s", lspPlan.WorkspaceConfiguration)
+
+	// 4b. Call pyrefly.resolveLaunch WITHOUT tools.python (graceful fallback, no pythonPath) and with Windows platform.
+	answerFallback, err := service.Host.Call(ctx, pythonSupportPluginID, lspPlan.Launch.Function, lspPlan.ResolveParams, ctxRef, 30*time.Second)
+	if err != nil {
+		t.Fatalf("Host.Call(pyrefly.resolveLaunch fallback): %v", err)
+	}
+	decodedFallback, err := kernel.DecodePluginLanguageServerLaunch(ctx, normalizedManifest, "python", lspDirs, answerFallback)
+	if err != nil {
+		t.Fatalf("DecodePluginLanguageServerLaunch(fallback): %v", err)
+	}
+	if strings.Contains(string(decodedFallback.WorkspaceConfiguration), `"pythonPath"`) {
+		t.Fatalf("workspaceConfiguration must omit pythonPath when tools.python is absent: %s", decodedFallback.WorkspaceConfiguration)
+	}
+
+	var resolveParamsWin map[string]any
+	if err := json.Unmarshal(lspPlan.ResolveParams, &resolveParamsWin); err != nil {
+		t.Fatal(err)
+	}
+	resolveParamsWin["platform"] = map[string]any{"os": "windows", "arch": "x86_64"}
+	encodedWin, _ := json.Marshal(resolveParamsWin)
+	answerWin, err := service.Host.Call(ctx, pythonSupportPluginID, lspPlan.Launch.Function, encodedWin, ctxRef, 30*time.Second)
+	if err != nil {
+		t.Fatalf("Host.Call(pyrefly.resolveLaunch windows): %v", err)
+	}
+	decodedWin, err := kernel.DecodePluginLanguageServerLaunch(ctx, normalizedManifest, "python", lspDirs, answerWin)
+	if err != nil {
+		t.Fatalf("DecodePluginLanguageServerLaunch(windows): %v", err)
+	}
+	if decodedWin.Launch.Path != "bin/pyrefly.exe" {
+		t.Fatalf("windows launch path = %q, want bin/pyrefly.exe", decodedWin.Launch.Path)
 	}
 
 	// 5. Plan debug adapter (debugpy), verify launch/attach startArguments, and run DAP initialize smoke.
 	dapPlan, err := kernel.PlanPluginDebugAdapter(ctx, normalizedManifest, "debugpy", core.PluginBackendDirectories{
 		PluginDirectory: installedDir,
 		StateDirectory:  stateDir,
-		LogDirectory:    logDir,
+		LogDirectory:    sessionLogDir,
 		Architecture:    core.PluginArchitecture(),
 	})
 	if err != nil {
@@ -240,7 +483,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	if err := os.WriteFile(mainPy, []byte("if __name__ == '__main__':\n    print('ok')\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(workspace, "pyproject.toml"), []byte("[project]\nname = \"ws-app\"\nversion = \"0.1.0\"\n[project.scripts]\nws-cli = \"ws_pkg.cli:main\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(workspace, "pyproject.toml"), []byte("[project]\nname = \"ws-app\"\nversion = \"0.1.0\"\nrequires-python = \">=3.10\"\n[project.scripts]\nws-cli = \"ws_pkg.cli:main\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(workspace, "uv.lock"), []byte("version = 1\n"), 0o644); err != nil {
@@ -250,6 +493,14 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(workspace, "ruff.toml"), []byte("line-length = 100\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testsDir := filepath.Join(workspace, "tests")
+	if err := os.MkdirAll(testsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sampleTestPy := "import pytest\n\ndef test_alpha():\n    assert 1 + 1 == 2\n\n@pytest.mark.parametrize('n,want', [(2, 6), (4, 12)])\ndef test_scale(n, want):\n    assert n * 3 == want\n"
+	if err := os.WriteFile(filepath.Join(testsDir, "test_sample.py"), []byte(sampleTestPy), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -292,7 +543,6 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("unexpected attach connection: %+v", attachStart.Connection)
 	}
 
-	// Smoke-run debugpy adapter over stdio with real systemPython and --log-dir.
 	dapArgs := append([]string{}, dapPlan.Launch.RuntimeArguments...)
 	dapArgs = append(dapArgs, entryScript)
 	dapArgs = append(dapArgs, dapPlan.Arguments...)
@@ -321,7 +571,8 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	_ = dapCmd.Process.Kill()
 	_ = dapCmd.Wait()
 
-	// 6. Detect all 4 build systems (python, uv, conda, ruff), run build_model.py, and decode litheBuildModel.
+	// 6. Detect all 4 build systems (conda, python, ruff, uv), start real build_provider.py,
+	// and verify lithe/build/model, lithe/build/discoverTests, and lithe/build/test + junitXml!
 	detection, err := kernel.DetectBuildSystems(ctx, workspace, []json.RawMessage{normalizedManifest})
 	if err != nil {
 		t.Fatalf("DetectBuildSystems: %v", err)
@@ -335,26 +586,58 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("detected build systems = %v, want [conda python ruff uv]", detectedIDs)
 	}
 
-	outFile := filepath.Join(t.TempDir(), "model.json")
+	buildWsState := t.TempDir()
+	providerClient, err := buildprovider.Start(ctx, service.Backend, pluginbackend.StartRequest{
+		Manifest:                normalizedManifest,
+		PackageDirectory:        installedDir,
+		PluginID:                pythonSupportPluginID,
+		ProviderID:              pythonSupportPluginID + "/build/python",
+		BuildSystemID:           "python",
+		Role:                    "build",
+		StateDirectory:          stateDir,
+		WorkspaceStateDirectory: buildWsState,
+		LogDirectory:            sessionLogDir,
+		Architecture:            core.PluginArchitecture(),
+		RootURI:                 pythonFileURI(workspace),
+		WorkingDirectory:        workspace,
+	})
+	if err != nil {
+		t.Fatalf("buildprovider.Start(python): %v", err)
+	}
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer stopCancel()
+		_ = providerClient.Close(stopCtx)
+	}()
+
+	pytestTool := resolvePytestToolForE2E(t, ctx, systemPython)
+
+	// 6a. Provider lithe/build/model -> DecodeBuildModel.
 	modelPlan, err := kernel.PlanBuildModel(ctx, normalizedManifest, "python", core.BuildPlanRequest{
 		Root:                    ".",
 		PluginDirectory:         installedDir,
-		WorkspaceStateDirectory: stateDir,
-		OutputFile:              outFile,
+		WorkspaceStateDirectory: buildWsState,
 		WorkspaceRoot:           workspace,
+		Tool:                    &pytestTool,
 	})
 	if err != nil {
 		t.Fatalf("PlanBuildModel: %v", err)
 	}
-	modelCmd := exec.CommandContext(ctx, systemPython, modelPlan.Arguments...)
-	modelCmd.Dir = workspace
-	if modelOut, runErr := modelCmd.CombinedOutput(); runErr != nil {
-		t.Fatalf("build_model.py failed: %v\n%s", runErr, modelOut)
+	if modelPlan.Provider == nil || modelPlan.Provider.Method != "lithe/build/model" {
+		t.Fatalf("expected provider modelPlan, got %+v", modelPlan)
+	}
+	modelOp, err := providerClient.Execute(ctx, modelPlan.Provider.Method, modelPlan.Provider.Params, 30_000)
+	if err != nil {
+		t.Fatalf("providerClient.Execute(lithe/build/model): %v", err)
+	}
+	modelRawResult, err := modelOp.Wait(ctx)
+	if err != nil {
+		t.Fatalf("modelOp.Wait: %v", err)
 	}
 	decodedModel, err := kernel.DecodeBuildModel(ctx, normalizedManifest, "python", core.BuildDecodeModelRequest{
 		WorkspaceRoot: workspace,
 		Root:          ".",
-		OutputFile:    outFile,
+		Result:        modelRawResult,
 	})
 	if err != nil {
 		t.Fatalf("DecodeBuildModel: %v", err)
@@ -364,6 +647,143 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	}
 	if len(decodedModel.Run) < 2 {
 		t.Fatalf("expected derived Run entries for ws-cli and main.py, got %+v", decodedModel.Run)
+	}
+
+	// 6b. Provider lithe/build/discoverTests -> DecodeBuildTestDiscovery.
+	discPlan, err := kernel.PlanBuildTestDiscovery(ctx, normalizedManifest, "python", core.BuildPlanRequest{
+		Root:          ".",
+		WorkspaceRoot: workspace,
+		Tool:          &pytestTool,
+	})
+	if err != nil {
+		t.Fatalf("PlanBuildTestDiscovery: %v", err)
+	}
+	if discPlan.Provider == nil || discPlan.Provider.Method != "lithe/build/discoverTests" {
+		t.Fatalf("expected provider testDiscoveryPlan, got %+v", discPlan)
+	}
+	discOp, err := providerClient.Execute(ctx, discPlan.Provider.Method, discPlan.Provider.Params, 45_000)
+	if err != nil {
+		t.Fatalf("providerClient.Execute(lithe/build/discoverTests): %v", err)
+	}
+	discRawResult, err := discOp.Wait(ctx)
+	if err != nil {
+		t.Fatalf("discOp.Wait: %v", err)
+	}
+	decodedDiscovery, err := kernel.DecodeBuildTestDiscovery(ctx, normalizedManifest, "python", core.BuildDecodeTestDiscoveryRequest{
+		Root:   ".",
+		Result: discRawResult,
+	})
+	if err != nil {
+		t.Fatalf("DecodeBuildTestDiscovery: %v", err)
+	}
+	if len(decodedDiscovery.Tests) != 3 {
+		t.Fatalf("discovered tests = %+v, want 3 items (test_alpha, test_scale[2-6], test_scale[4-12])", decodedDiscovery.Tests)
+	}
+	var chosenTest *core.BuildDiscoveredTest
+	for i := range decodedDiscovery.Tests {
+		if decodedDiscovery.Tests[i].Suite == "tests/test_sample.py" && decodedDiscovery.Tests[i].Case == "test_scale[2-6]" {
+			chosenTest = &decodedDiscovery.Tests[i]
+			break
+		}
+	}
+	if chosenTest == nil {
+		t.Fatalf("expected discovered parameterized selector tests/test_sample.py :: test_scale[2-6], got %+v", decodedDiscovery.Tests)
+	}
+
+	// 6c. Run that exact single discovered test via PlanBuildTest -> lithe/build/test -> DecodeBuildTestResults!
+	testPlan, err := kernel.PlanBuildTest(ctx, normalizedManifest, "python", core.BuildTestRequest{
+		Root:          ".",
+		WorkspaceRoot: workspace,
+		Project:       chosenTest.Project,
+		Target:        chosenTest.Target,
+		Suite:         chosenTest.Suite,
+		Case:          chosenTest.Case,
+		Projects:      []string{"."},
+	})
+	if err != nil {
+		t.Fatalf("PlanBuildTest: %v", err)
+	}
+	if testPlan.Provider == nil || testPlan.Provider.Method != "lithe/build/test" {
+		t.Fatalf("expected provider testPlan, got %+v", testPlan)
+	}
+	// Attach resolved pytestTool hints to the provider params just as workbench tests.go does.
+	var testProviderParams map[string]any
+	if err := json.Unmarshal(testPlan.Provider.Params, &testProviderParams); err != nil {
+		t.Fatal(err)
+	}
+	testProviderParams["tool"] = map[string]any{"executable": pytestTool.Executable}
+	if len(pytestTool.Environment) > 0 {
+		envObj, _ := testProviderParams["environment"].(map[string]any)
+		if envObj == nil {
+			envObj = map[string]any{}
+		}
+		for k, v := range pytestTool.Environment {
+			envObj[k] = v
+		}
+		testProviderParams["environment"] = envObj
+	}
+	enrichedTestParams, err := json.Marshal(testProviderParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testOp, err := providerClient.Execute(ctx, testPlan.Provider.Method, enrichedTestParams, 60_000)
+	if err != nil {
+		t.Fatalf("providerClient.Execute(lithe/build/test): %v", err)
+	}
+	testRawResult, err := testOp.Wait(ctx)
+	if err != nil {
+		t.Fatalf("testOp.Wait: %v", err)
+	}
+	var execReply struct {
+		ExitCode int    `json:"exitCode"`
+		Output   string `json:"output"`
+	}
+	if err := json.Unmarshal(testRawResult, &execReply); err != nil {
+		t.Fatal(err)
+	}
+	if execReply.ExitCode != 0 {
+		t.Fatalf("pytest single-case exitCode = %d, output:\n%s", execReply.ExitCode, execReply.Output)
+	}
+	decodedResults, err := kernel.DecodeBuildTestResults(ctx, normalizedManifest, "python", core.BuildTestResultsRequest{
+		WorkspaceRoot: workspace,
+		Root:          ".",
+		Project:       ".",
+		Projects:      []string{"."},
+		Output:        execReply.Output,
+	})
+	if err != nil {
+		t.Fatalf("DecodeBuildTestResults: %v", err)
+	}
+	if !decodedResults.Success || decodedResults.Summary.Total != 1 || decodedResults.Summary.Passed != 1 {
+		t.Fatalf("unexpected decoded JUnit XML results: %+v", decodedResults)
+	}
+
+	// Verify Core validated and forwarded structured lithe/log events for both backend and build provider
+	// with zero plugins.diagnostics.rejected events!
+	drained, err := kernel.DrainCoreEvents(ctx)
+	if err != nil {
+		t.Fatalf("DrainCoreEvents: %v", err)
+	}
+	logMu.Lock()
+	captured := slices.Clone(recordedEvents)
+	logMu.Unlock()
+	for _, ev := range drained.Events {
+		op, _ := ev.Fields["operation"].(string)
+		captured = append(captured, fmt.Sprintf("%s:%s", ev.Event, op))
+		if ev.Event == "plugins.diagnostics.rejected" {
+			t.Fatalf("unexpected rejected plugin diagnostic from Core: %+v", ev)
+		}
+	}
+	for _, entry := range captured {
+		if strings.HasPrefix(entry, "plugins.diagnostics.rejected:") {
+			t.Fatalf("unexpected rejected plugin diagnostic in log facts: %v", captured)
+		}
+	}
+	if !slices.Contains(captured, "plugins.operation.finished:pyrefly.resolveLaunch") {
+		t.Fatalf("expected plugins.operation.finished:pyrefly.resolveLaunch in Core log facts, got %v", captured)
+	}
+	if !slices.Contains(captured, "plugins.operation.finished:lithe/build/discoverTests") {
+		t.Fatalf("expected plugins.operation.finished:lithe/build/discoverTests in Core log facts, got %v", captured)
 	}
 
 	// 7. Verify Python Traceback outputLinkMatchers.
@@ -389,7 +809,8 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("unexpected output links: %+v", links)
 	}
 
-	// 8. Verify .venv toolchain resolution (including workspace trust gating when supported by host).
+	// 8. Verify .venv toolchain resolution (including workspace trust gating) AND Core toolchains.decodeReply
+	// validation of scripts/toolchain_provider.py output!
 	venvCmd := exec.CommandContext(ctx, systemPython, "-m", "venv", ".venv")
 	venvCmd.Dir = workspace
 	if out, err := venvCmd.CombinedOutput(); err != nil {
@@ -435,6 +856,126 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 			t.Fatalf("trusted .venv resolution = %q, want literal path %q", resolvedExec, expectedVenvPython)
 		}
 	}
+
+	// Verify real Core toolchains.decodeReply accepts scripts/toolchain_provider.py query_python_toolchains output.
+	extUvRoot := t.TempDir()
+	if resolvedExt, evalErr := filepath.EvalSymlinks(extUvRoot); evalErr == nil {
+		extUvRoot = resolvedExt
+	}
+	extPyHome := filepath.Join(extUvRoot, "cpython-3.12.6")
+	extPyBinDir := filepath.Join(extPyHome, "bin")
+	extPyExe := filepath.Join(extPyBinDir, "python3")
+	if runtime.GOOS == "windows" {
+		extPyBinDir = filepath.Join(extPyHome, "Scripts")
+		extPyExe = filepath.Join(extPyBinDir, "python.exe")
+	}
+	if err := os.MkdirAll(extPyBinDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(extPyExe, []byte("#!/bin/sh\necho Python 3.12.6\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extPyHome, "pyvenv.cfg"), []byte("version_info = 3.12.6\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tcReqParams := map[string]any{
+		"operationID": "tc-core-e2e-1",
+		"generation":  1,
+		"providerID":  "python",
+		"authority":   map[string]any{"kind": "local"},
+		"tools":       []string{"python"},
+		"workspace":   map[string]any{"rootID": "ws-1", "root": workspace, "directory": "."},
+		"context":     map[string]any{"contextID": "ctx-e2e-1", "generation": 1},
+	}
+	tcReqParamsJSON, _ := json.Marshal(tcReqParams)
+	pySnippet := fmt.Sprintf(
+		"import json, sys; sys.path.insert(0, %q); from pathlib import Path; from lithe_rpc import CallContext, CancelToken, DiagnosticsReporter; from toolchain_provider import query_python_toolchains, TOOLCHAIN_PROVIDER_DECLARATION; params = json.loads(sys.argv[1]); ctx = CallContext(cancel_token=CancelToken(), diagnostics=DiagnosticsReporter(lambda _: None, lambda _: True), suppress_cb=lambda: None); out = query_python_toolchains(params, ctx, home_dir=Path(%q), environ={'UV_PYTHON_INSTALL_DIR': %q}); print(json.dumps({'decl': TOOLCHAIN_PROVIDER_DECLARATION, 'reply': out}))",
+		filepath.Join(installedDir, "scripts"),
+		extUvRoot,
+		extUvRoot,
+	)
+	tcOutBytes, err := exec.CommandContext(ctx, systemPython, "-I", "-B", "-c", pySnippet, string(tcReqParamsJSON)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("running toolchain_provider.py failed: %v\n%s", err, tcOutBytes)
+	}
+	var tcBundle struct {
+		Decl  json.RawMessage `json:"decl"`
+		Reply json.RawMessage `json:"reply"`
+	}
+	if err := json.Unmarshal(tcOutBytes, &tcBundle); err != nil {
+		t.Fatalf("unmarshaling toolchain_provider output: %v\n%s", err, tcOutBytes)
+	}
+
+	// Build an in-memory manifest variant declaring toolchainProviders + packaged backend so Core toolchains.decodeReply
+	// checks every field, path, installation, and statement emitted by toolchain_provider.py!
+	var tcManifestMap map[string]any
+	if err := json.Unmarshal(normalizedManifest, &tcManifestMap); err != nil {
+		t.Fatal(err)
+	}
+	reqMap, _ := tcManifestMap["requires"].(map[string]any)
+	reqMap["toolchainProviders"] = 0
+	perms, _ := tcManifestMap["permissions"].([]any)
+	tcManifestMap["permissions"] = append(perms, "toolchains.provide")
+	tcManifestMap["backend"] = map[string]any{
+		"launch": map[string]any{"kind": "packaged", "path": expectedPyreflyRel},
+	}
+	tcManifestMap["toolchainProviders"] = []any{tcBundle.Decl}
+	tcManifestBytes, _ := json.Marshal(tcManifestMap)
+	tcRegistryInput, err := toolchain.RegistryInput([]json.RawMessage{tcManifestBytes})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pyprojectPath := filepath.Join(workspace, "pyproject.toml")
+	pyVerPath := filepath.Join(workspace, ".python-version")
+	condaTxtPath := filepath.Join(extUvRoot, ".conda", "environments.txt")
+	fsFacts := []core.ToolchainFileFact{
+		{Path: workspace, CanonicalPath: workspace, Kind: "directory"},
+		{Path: extUvRoot, CanonicalPath: extUvRoot, Kind: "directory"},
+		{Path: extPyHome, CanonicalPath: extPyHome, Kind: "directory"},
+		{Path: extPyExe, CanonicalPath: extPyExe, Kind: "file", Executable: true},
+		{Path: pyprojectPath, CanonicalPath: pyprojectPath, Kind: "file"},
+		{Path: pyVerPath, CanonicalPath: pyVerPath, Kind: "missing"},
+		{Path: condaTxtPath, CanonicalPath: condaTxtPath, Kind: "missing"},
+	}
+	wireReq, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      "req-1",
+		"method":  "toolchains/query",
+		"params":  tcReqParams,
+	})
+	wireResp, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      "req-1",
+		"result":  tcBundle.Reply,
+	})
+	var decodeReplyOutcome struct {
+		Status   string                     `json:"status"`
+		Error    *core.MarketplaceRejection `json:"error"`
+		Snapshot json.RawMessage            `json:"snapshot"`
+	}
+	if err := kernel.Execute(ctx, "toolchains.decodeReply", core.ToolchainQuery{
+		Registry:          tcRegistryInput,
+		PluginID:          pythonSupportPluginID,
+		Request:           wireReq,
+		Response:          wireResp,
+		CurrentGeneration: 1,
+		Filesystem:        fsFacts,
+		Platform:          toolchain.PlatformName(runtime.GOOS),
+		WorkspaceRoots:    []string{workspace},
+	}, &decodeReplyOutcome); err != nil {
+		t.Fatalf("toolchains.decodeReply failed: %v", err)
+	}
+	if decodeReplyOutcome.Status != "ok" {
+		t.Fatalf("toolchains.decodeReply rejected reply: status=%s err=%+v", decodeReplyOutcome.Status, decodeReplyOutcome.Error)
+	}
+	if !strings.Contains(string(decodeReplyOutcome.Snapshot), "3.12.6") {
+		t.Fatalf("expected decoded toolchain snapshot to include installation 3.12.6, got %s", decodeReplyOutcome.Snapshot)
+	}
+
+	// Shut down backend cleanly BEFORE checking package immutability so any shutdown write would be caught too!
+	service.Host.Stop(pythonSupportPluginID)
 
 	// 9. Assert installed plugin package file list and SHA-256 hashes are 100% unchanged!
 	afterDigest := pythonPackageDigest(t, installedDir)
