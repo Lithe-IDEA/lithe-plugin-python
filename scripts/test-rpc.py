@@ -59,9 +59,9 @@ with socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=5) as con
         parent = """
 import subprocess, sys
 process = subprocess.Popen([sys.executable, '-I', '-B', '-c', sys.argv[1], sys.argv[2]],
-                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True)
 try:
-    assert process.stdout.readline() == b'ready\\n'
+    assert process.stdout.readline() == 'ready\\n'
     if sys.argv[3] == 'cancel':
         process.wait(timeout=20)
 finally:
