@@ -22,10 +22,12 @@ import (
 
 	"github.com/1lck/Lithe-IDEA/desktop/internal/buildprovider"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginbackend"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginhost"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/plugininstall"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginservice"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginsettings"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/plugintrust"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/store"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/toolchain"
@@ -491,15 +493,18 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	_ = dapCmd.Process.Kill()
 	_ = dapCmd.Wait()
 
-	// 6. Detect all 4 build systems (conda, python, ruff, uv), start real build_provider.py,
-	// and verify lithe/build/model, lithe/build/discoverTests, and lithe/build/test + junitXml!
+	// 6. Detect all four build systems and exercise the Python model, discovery and test run.
 	detection, err := kernel.DetectBuildSystems(ctx, workspace, []json.RawMessage{normalizedManifest})
 	if err != nil {
 		t.Fatalf("DetectBuildSystems: %v", err)
 	}
 	var detectedIDs []string
+	var pythonInstance core.BuildInstance
 	for _, inst := range detection.Instances {
 		detectedIDs = append(detectedIDs, inst.BuildSystemID)
+		if inst.BuildSystemID == "python" {
+			pythonInstance = inst
+		}
 	}
 	slices.Sort(detectedIDs)
 	if !slices.Equal(detectedIDs, []string{"conda", "python", "ruff", "uv"}) {
@@ -569,32 +574,49 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("expected derived Run entries for ws-cli and main.py, got %+v", decodedModel.Run)
 	}
 
-	// 6b. Provider lithe/build/discoverTests -> DecodeBuildTestDiscovery.
-	discPlan, err := kernel.PlanBuildTestDiscovery(ctx, normalizedManifest, "python", core.BuildPlanRequest{
-		Root:          ".",
-		WorkspaceRoot: workspace,
-		Tool:          &pytestTool,
-	})
+	// 6b. Run the installed plugin's discovery through the workbench command path.
+	entries, err := service.Manager.Installed()
 	if err != nil {
-		t.Fatalf("PlanBuildTestDiscovery: %v", err)
+		t.Fatal(err)
 	}
-	if discPlan.Provider == nil || discPlan.Provider.Method != "lithe/build/discoverTests" {
-		t.Fatalf("expected provider testDiscoveryPlan, got %+v", discPlan)
+	buildPlugins, err := service.BuildPlugins(ctx, entries)
+	if err != nil || len(buildPlugins) != 1 || buildPlugins[0].PluginID != pythonSupportPluginID {
+		t.Fatalf("expected the installed Python build plugin: %+v (%v)", buildPlugins, err)
 	}
-	discOp, err := providerClient.Execute(ctx, discPlan.Provider.Method, discPlan.Provider.Params, 45_000)
+	buildPlugin := buildPlugins[0]
+	instance := buildInstance{
+		BuildInstance:    pythonInstance,
+		PluginID:         buildPlugin.PluginID,
+		Version:          buildPlugin.Version,
+		Manifest:         buildPlugin.Manifest,
+		PackageDirectory: buildPlugin.Directory,
+		System:           buildPlugin.Systems["python"],
+	}
+	if instance.System.Test == nil || !instance.System.Test.DiscoveryCommand {
+		t.Fatal("installed Python build system did not expose command discovery")
+	}
+	preferences := pluginsettings.New(kernel, appStore.Dir())
+	settings, err := preferences.Load(ctx, instance.Manifest, workspace)
 	if err != nil {
-		t.Fatalf("providerClient.Execute(lithe/build/discoverTests): %v", err)
+		t.Fatal(err)
 	}
-	discRawResult, err := discOp.Wait(ctx)
+	pythonSetting, err := json.Marshal(pytestTool.Executable)
 	if err != nil {
-		t.Fatalf("discOp.Wait: %v", err)
+		t.Fatal(err)
 	}
-	decodedDiscovery, err := kernel.DecodeBuildTestDiscovery(ctx, normalizedManifest, "python", core.BuildDecodeTestDiscoveryRequest{
-		Root:   ".",
-		Result: discRawResult,
-	})
+	if _, err := preferences.Save(ctx, settings, "global", []core.PluginSettingEdit{{ID: "pythonExecutable", Value: pythonSetting}}, nil); err != nil {
+		t.Fatalf("set the test interpreter: %v", err)
+	}
+	workbench := &App{kernel: kernel, plugins: service, store: appStore, text: i18n.For(i18n.English)}
+	discoveryOperation := core.NewOperation()
+	discoveryCtx := core.WithOrigin(ctx, core.Origin{Operation: discoveryOperation})
+	decodedDiscovery, err := workbench.buildTestDiscovery(discoveryCtx, &project{root: workspace}, instance, kernel, false)
 	if err != nil {
-		t.Fatalf("DecodeBuildTestDiscovery: %v", err)
+		t.Fatalf("workbench command discovery: %v", err)
+	}
+	discoveryFiles, err := os.ReadDir(buildStateDirectory(service.Root, workspace, instance))
+	if err != nil || len(discoveryFiles) != 0 {
+		t.Fatalf("discovery left workspace state entries %v (%v)", discoveryFiles, err)
 	}
 	if len(decodedDiscovery.Tests) != 3 {
 		t.Fatalf("discovered tests = %+v, want 3 items (test_alpha, test_scale[2-6], test_scale[4-12])", decodedDiscovery.Tests)
@@ -668,8 +690,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("unexpected decoded JUnit XML results: %+v", decodedResults)
 	}
 
-	// Verify Core validated and forwarded structured lithe/log events for both backend and build provider
-	// with zero plugins.diagnostics.rejected events!
+	// Verify plugin RPC diagnostics and the workbench's command terminal event.
 	drained, err := kernel.DrainCoreEvents(ctx)
 	if err != nil {
 		t.Fatalf("DrainCoreEvents: %v", err)
@@ -677,9 +698,13 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	logMu.Lock()
 	captured := slices.Clone(recordedEvents)
 	logMu.Unlock()
+	var discoveryTerminals []string
 	for _, ev := range drained.Events {
 		op, _ := ev.Fields["operation"].(string)
 		captured = append(captured, fmt.Sprintf("%s:%s", ev.Event, op))
+		if op == "lithe/build/discoverTests" && ev.Op == discoveryOperation {
+			discoveryTerminals = append(discoveryTerminals, ev.Event)
+		}
 		if ev.Event == "plugins.diagnostics.rejected" {
 			t.Fatalf("unexpected rejected plugin diagnostic from Core: %+v", ev)
 		}
@@ -692,8 +717,8 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	if !slices.Contains(captured, "plugins.operation.finished:pyrefly.resolveLaunch") {
 		t.Fatalf("expected plugins.operation.finished:pyrefly.resolveLaunch in Core log facts, got %v", captured)
 	}
-	if !slices.Contains(captured, "plugins.operation.finished:lithe/build/discoverTests") {
-		t.Fatalf("expected plugins.operation.finished:lithe/build/discoverTests in Core log facts, got %v", captured)
+	if !slices.Equal(discoveryTerminals, []string{"plugins.operation.finished"}) {
+		t.Fatalf("expected one successful command discovery terminal, got %v (Core events %v)", discoveryTerminals, captured)
 	}
 
 	// 7. Verify Python Traceback outputLinkMatchers.

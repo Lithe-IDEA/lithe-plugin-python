@@ -1,6 +1,6 @@
 # Python Support for Lithe (`io.github.lithe-idea.python-support`)
 
-Python language support plugin for Lithe (`schemaVersion: 0`, `pluginAPIVersion: 0`), bundling [Pyrefly](https://github.com/facebook/pyrefly) `1.4.1` for fast static type checking and LSP navigation, [debugpy](https://github.com/microsoft/debugpy) `1.8.22` for source-level debugging, a packaged Rust backend for interpreter discovery and language-server startup, and a Python build provider for model, run, and pytest integration.
+Python language support plugin for Lithe (`schemaVersion: 0`, `pluginAPIVersion: 0`), bundling [Pyrefly](https://github.com/facebook/pyrefly) `1.4.1` for static type checking and LSP navigation and [debugpy](https://github.com/microsoft/debugpy) `1.8.22` for source-level debugging. A Rust backend discovers interpreters and starts the language server. The build integration uses a pytest discovery command and a Python provider for build models, run entries, and test execution.
 
 遵循 Lithe 插件契约 v1（`schemaVersion: 0`），为 Lithe 桌面端（macOS / Windows / Linux）提供开箱即用的 Python 语言支持、宿主工具链驱动的 `Pyrefly` 解释器注入、`.venv` / `.conda` / `conda` / `uv` / `pyenv` 多来源环境发现、动态 `pytest` 测试树收集与执行、`uv` / `conda` / `Ruff` 构建任务、源码级断点调试及新建项目向导。跨平台实现与验证记录详见 [docs/feature-matrix.md](docs/feature-matrix.md)。
 
@@ -19,10 +19,10 @@ Python language support plugin for Lithe (`schemaVersion: 0`, `pluginAPIVersion:
    - 严格按 Core 4 层优先级解析：项目级显式绑定 → 项目内环境（`.venv` / `venv` / `.conda`，`projectKind: "environment"`，受宿主工作区信任门控并保留字面软链路径）→ 全局设置 → `VIRTUAL_ENV` 与 `PATH`（`python3` / `python`）→ 16 条跨平台自动发现规则（覆盖 `UV_PYTHON_INSTALL_DIR`、`XDG_DATA_HOME`、`PYENV_ROOT`、`CONDA_ENVS_PATH`、`CONDA_PREFIX`、`WORKON_HOME`、`LOCALAPPDATA`、`APPDATA`、Homebrew、macOS Framework、`~/.pyenv`、`~/.local/share/uv`、`*conda*/envs/*`、`miniforge*/envs/*`）。
    - Rust 提供者读取 conda 环境登记表和安装元数据，以及 uv、pyenv、Poetry、Pipenv 管理的外部环境。项目中的 `.python-version` 选择版本，同一目录的 `pyproject.toml` 限制可选版本。宿主观察这些输入并在变化后重新查询。
    - 需要支持 `toolchainProviders: 0` 的 Lithe 桌面端。外部环境的解释器链接若指向环境目录之外，Core 会拒绝将该环境作为提供者候选。常见于以链接方式创建的 Unix Poetry/Pipenv 环境。使用常规可执行文件副本的环境可被发现，项目内 `.venv` 继续使用宿主的信任流程。
-4. **4 个独立构建系统与动态 `pytest` 测试树（`buildSystems` & `buildProviders`）**
-   - `python`：通过纯 Python 构建提供者 `scripts/build_provider.py --cache ${workspaceStateDir}`（`python -I -B`，`executesProjectCode: true`，`mayUseNetwork: false`）承载：
+4. **4 个独立构建系统与动态 `pytest` 测试树（`buildSystems: 1` 与 `buildProviders`）**
+   - `python` 通过 `test.discoveryCommand` 启动 `python -I -B scripts/discover_tests.py`。宿主使用选定解释器和构建实例目录运行命令，并提供 `${outputFile}`。命令运行 `pytest --collect-only`，汇报函数、类方法和参数化用例的精确选择器。发现为空时写入有效的 `litheTestDiscovery` v0 空列表。选择器或报告超出契约限制时整次发现失败。pytest 缓存与报告位于宿主 `${workspaceStateDir}` 下的本次发现目录，由宿主在操作结束时清理。宿主负责取消并回收整个进程树，收集脚本保留 45 秒的 pytest 超时。
+   - Python 构建提供者 `scripts/build_provider.py` 使用 `python -I -B` 启动，处理以下请求。
      - `lithe/build/model`：复用 `scripts/build_model.py` 纯 `ast` + `tomllib`（Python 3.9–3.10 自动回退内置 `vendor/tomli`）静态提取 `[project.scripts]`、包 `__main__.py`、顶层 `__main__` 脚本、Django `manage.py`、FastAPI ASGI、Flask WSGI 运行目标（绝不执行用户代码），派生 7 类声明式 `run` 配置；
-     - `lithe/build/discoverTests`：运行可随 `$/cancelRequest` 整组终止的 `pytest --collect-only`，收集函数、类方法与参数化用例，按 Core 的条数和 UTF-8 字节限制返回 `litheTestDiscovery` v0。缓存写入 `${workspaceStateDir}`。
      - `lithe/build/test`：通过 pytest node ID 精确运行套件或单个用例，也接受 JUnit XML 类名。指定用例时须同时给出套件。运行时推送 `lithe/build/progress`，并产出 `.pytest_cache/lithe-junit.xml` 供 Core 解码。构建请求在排队时即可取消，执行进程的所有权随请求结束。macOS 和 Linux 使用 POSIX 进程组，Windows 使用 Job Object。
      - `lithe/build/runEntrypoints`：协商 `litheBuild` 1 时按文件静态识别入口并抑制高频成功日志；
      - 同时保留声明式任务 `pip install -r requirements.txt` 与 `mypy`（带诊断 `lineMatcher`）。
@@ -53,7 +53,6 @@ Rust SDK 和构建提供者的 `scripts/lithe_rpc.py` 通过 stdio JSON-RPC 2.0 
 | `pyrefly.resolveLaunch` | Rust 后端 | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "invalid_tool_hint"`，`count: 1`）<br>恢复：`plugins.operation.recovery_finished`（`code: "tool_hint_restored"`，`count: 1`） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `invalid_tool_hint`、`tool_hint_restored`、`python.unknownServer`、`internal_error` |
 | `python.inspectEnvironment` | Rust 后端 | **已启用 `suppressSuccessDiagnostics`**（高频只读查询成功不发 `INFO`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidExecutable`、`python.environmentUnavailable`、`internal_error` |
 | `lithe/build/model` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "pyproject_parse_failed"`，`count: 1`）<br>恢复：`plugins.operation.recovery_finished`（`code: "pyproject_restored"`，`count: 1`） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `pyproject_parse_failed`、`pyproject_restored`、`python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
-| `lithe/build/discoverTests` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "test_discovery_truncated"`，`count` 为超出条数、大小或无法表示为有效选择器而省略的条目数） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `test_discovery_truncated`、`python.pytestUnavailable`、`python.pytestTimedOut`、`python.pytestCollectionFailed`、`python.interpreterUnavailable`、`python.cacheUnavailable` |
 | `lithe/build/test` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`；测试断言失败仍属正常协议返回 `exitCode != 0`，失效/越界选择器、进程级超时或解释器缺失才记 `ERROR`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidTestSelector`、`python.staleTestSelector`、`python.pytestTimedOut`、`python.interpreterUnavailable`、`python.projectUnavailable`、`internal_error` |
 | `lithe/build/runEntrypoints` | `build_provider.py` | **已启用 `suppressSuccessDiagnostics`**（打开文件高频静态入口探测成功不发 `INFO`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
 | `notification` / `result-encoding` / `shutdown` | `lithe_rpc.py` | — | — | `plugins.operation.failed`（`ERROR`） | `framing_error`、`result_encoding_failed`、`internal_error` |
@@ -62,12 +61,13 @@ Rust SDK 和构建提供者的 `scripts/lithe_rpc.py` 通过 stdio JSON-RPC 2.0 
 
 ### 2. 宿主代记的声明式插件操作（通道：`plugins/io.github.lithe-idea.python-support/host`）
 
-声明式启动的语言服务器子进程与调试适配器由宿主与 Core 经 `diagnostics.recordPluginOperation` 将唯一终态代记到 `plugins/io.github.lithe-idea.python-support/host`（用户主动取消或停止不记录）：
+声明式启动的语言服务器子进程、调试适配器和测试发现命令由宿主与 Core 经 `diagnostics.recordPluginOperation` 将唯一终态代记到 `plugins/io.github.lithe-idea.python-support/host`。用户主动取消或停止不记录。
 
 | `operation` | 声明来源 | 记录方 | 成功事件与级别 | 失败事件与级别 | 可能的 `host.*` 失败类别标识（`code`） |
 | --- | --- | --- | --- | --- | --- |
 | `languageServer/start` | `languageServers[]`（`pyrefly.resolveLaunch` 解析后的 `pyrefly lsp` 进程） | 启动前失败由桌面宿主记录；进入启动后经 `lsp.startServer.startupOperation` 交由 Core 记录唯一终态 | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.planFailed`、`host.executableUnavailable`、`host.launchFailed`、`host.exitedEarly`、`host.initializeFailed`、`host.timedOut` |
 | `debugAdapter/start` | `debugAdapters[]`（`debugpy`） | 桌面宿主（`op` 为调试会话 ID；用户停止与 Core 拒绝建会话不记录） | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.executableUnavailable`、`host.launchFailed`、`host.exitedEarly`、`host.initializeFailed`、`host.timedOut` |
+| `lithe/build/discoverTests` | `buildSystems[].test.discoveryCommand`（`pytest --collect-only`） | 桌面宿主 | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.planFailed`、`host.executableUnavailable`、`host.launchFailed`、`host.commandFailed`、`host.timedOut`、`host.outputInvalid` |
 
 ### 3. 上游子进程通道、隐私红线与原生日志文件
 
@@ -76,7 +76,7 @@ Rust SDK 和构建提供者的 `scripts/lithe_rpc.py` 通过 stdio JSON-RPC 2.0 
 | Rust 后端 / `build_provider.py` | 结构化通道：`plugins/io.github.lithe-idea.python-support/host`<br>未分类 `stderr`：`plugins.host.stderr.received`（`DEBUG`） | **零自建日志文件**；会话启动与握手由 Core 记录 `plugins.host.process.started` / `plugins.host.protocol.initialized` / `plugins.host.session.updated`；未预期异常在 `stderr` 仅输出 `<server-name>: <category> (<ExceptionType>)` 受控短词，**绝不拼接文件路径、命令参数、源码片段、输出内容或环境变量值**。Core 对 `stderr` 按每行 4 KiB 限流并脱敏截断，仅在详细诊断开启时落盘。 |
 | `pyrefly lsp`（语言服务器） | 结构化通道：`plugins/io.github.lithe-idea.python-support/host`（或宿主内置 `lsp/python`） | Core 记录 `plugins.host.process.started`、`plugins.host.protocol.initialized`、`plugins.host.session.updated`；`window/logMessage` 与 `window/showMessage` 保留显式 `ERROR`/`WARN`/`INFO`/`DEBUG` 级别；未分类 `stderr` 经 `plugins.host.stderr.received` 记为 `DEBUG`（仅详细诊断开启时落盘）；详细诊断开启（15 分钟单次到期）时仅接纳 `$/logTrace.message` 摘要，拒绝 `verbose` 载荷。`pyrefly` 不写任何插件内文件。 |
 | `debugpy`（调试适配器与启动器） | 结构化通道：`debug/debugpy`<br>原生日志文件：`sessions/<session>/plugins/io.github.lithe-idea.python-support/files/debugpy.*.log` | 结构化会话事件写入 `debug/debugpy`；上游 `debugpy` 原生日志通过 `--log-dir ${logDir}` 定向写入宿主 `Store.PluginFilesDirectory` 创建的当前会话专属目录（权限 `0700`，逐段校验拒绝软链越界，绝不写插件安装目录或 app bundle），按 `<pid>` 建文件并随宿主日志会话生命周期统一保留与清理。 |
-| `pytest`、构建任务与项目生成 | 构建/测试面板流式输出（`lithe/build/progress`）与 JUnit XML（`.pytest_cache/lithe-junit.xml`） | `lithe/build/discoverTests` 将 `pytest` 缓存重定向至 `${workspaceStateDir}`；进程 `stdout`、用户测试代码与环境变量值仅进入协议进度流或报告文件，绝不进入 v2 结构化诊断日志。 |
+| `pytest`、构建任务与项目生成 | 测试发现报告（`${outputFile}`）、构建/测试面板流式输出（`lithe/build/progress`）与 JUnit XML（`.pytest_cache/lithe-junit.xml`） | `pytest --collect-only` 的缓存与报告同目录，随宿主发现操作结束清理。宿主可向用户展示失败命令的部分输出。v2 结构化诊断只保存阶段类别和耗时。 |
 
 ---
 
