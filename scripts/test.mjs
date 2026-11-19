@@ -937,7 +937,7 @@ try {
     const uvPyDir = join(scratch, "uv-pythons", "cpython-3.12.6-macos-aarch64-none");
     const pyenvVerDir = join(scratch, "pyenv-root", "versions", "3.10.14");
     const workonRoot = join(scratch, "workon-envs");
-    const wsRoot = join(scratch, "tc-workspace");
+    const wsRoot = join(scratch, "tc-workspace (venv)");
     mkdirSync(wsRoot, { recursive: true });
     // Workspace-local .venv MUST be excluded from provider installations per toolchains contract!
     const wsLocalVenv = join(wsRoot, ".venv");
@@ -977,7 +977,8 @@ try {
 
     const workspaceDirectory = realpathSync.native(wsRoot);
     const workspaceHash = (path) => createHash("sha256").update(path).digest("base64url").slice(0, 8);
-    const pipenvName = `${basename(workspaceDirectory)}-${workspaceHash(workspaceDirectory)}`;
+    // Pipenv derives the default environment name from the full Pipfile path.
+    const pipenvName = `tc-workspace__venv_-${workspaceHash(join(workspaceDirectory, "Pipfile"))}`;
     const pipenvDir = join(workonRoot, pipenvName);
     makeFakePythonHome(pipenvDir, "3.12.3");
     writeFileSync(join(wsRoot, "poetry.lock"), "");
@@ -1100,6 +1101,15 @@ try {
       assert.ok(pipfileStmt);
       assert.equal(pipfileStmt.kind, "environment");
       assert.equal(pathKey(pipfileStmt.installation), expectedPath(pipenvDir));
+
+      writeFileSync(projectPath, '[project]\nname = "tc-demo"\nrequires-python = ">=3.12.5"\n');
+      const stricter = await queryProject(8, "tc-op-incompatible-pipenv");
+      assert.equal(
+        stricter.result.statements.some((statement) => pathKey(statement.source) === expectedPath(join(wsRoot, "Pipfile"))),
+        false,
+        "A Pipenv environment outside requires-python must not override the compatible declaration",
+      );
+      assert.equal(pathKey(declarations(stricter)[0].installation), expectedPath(uvPyDir));
 
       const poetryStmt = bySource.get(expectedPath(join(wsRoot, "poetry.lock")));
       assert.ok(poetryStmt);

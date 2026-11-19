@@ -17,7 +17,7 @@ Python language support plugin for Lithe (`schemaVersion: 0`, `pluginAPIVersion:
    - 当宿主在调用参数中传入已选定的非项目内解释器 `tools.python.executable`（如外部 `conda`、`uv`、`pyenv` 或系统环境）时，自动注入 `workspaceConfiguration.python.pythonPath`；当 `tools.python` 缺失（未选定或项目内虚拟环境尚未获信任）时优雅省略 `pythonPath`，保留 `pyrefly` 原生 `.venv` / `pyproject.toml` 自动发现且不阻断启动。
 3. **工具链与多环境发现增强（`toolDefinitions: python` + `toolchainProviders: 0`）**
    - 严格按 Core 4 层优先级解析：项目级显式绑定 → 项目内环境（`.venv` / `venv` / `.conda`，`projectKind: "environment"`，受宿主工作区信任门控并保留字面软链路径）→ 全局设置 → `VIRTUAL_ENV` 与 `PATH`（`python3` / `python`）→ 16 条跨平台自动发现规则（覆盖 `UV_PYTHON_INSTALL_DIR`、`XDG_DATA_HOME`、`PYENV_ROOT`、`CONDA_ENVS_PATH`、`CONDA_PREFIX`、`WORKON_HOME`、`LOCALAPPDATA`、`APPDATA`、Homebrew、macOS Framework、`~/.pyenv`、`~/.local/share/uv`、`*conda*/envs/*`、`miniforge*/envs/*`）。
-   - Rust 提供者读取 conda 环境登记表和安装元数据，以及 uv、pyenv、Poetry、Pipenv 管理的外部环境。项目中的 `.python-version` 选择版本，同一目录的 `pyproject.toml` 限制可选版本。宿主观察这些输入并在变化后重新查询。
+   - Rust 提供者读取 conda 环境登记表和安装元数据，以及 uv、pyenv、Poetry、Pipenv 管理的外部环境。项目中的 `.python-version` 选择版本，同一目录的 `pyproject.toml` 限制可选版本。Pipenv 默认环境按完整的 `Pipfile` 路径匹配，并遵守同目录的 Python 版本约束。宿主观察这些输入并在变化后重新查询。
    - 需要支持 `toolchainProviders: 0` 的 Lithe 桌面端。外部环境的解释器链接若指向环境目录之外，Core 会拒绝将该环境作为提供者候选。常见于以链接方式创建的 Unix Poetry/Pipenv 环境。使用常规可执行文件副本的环境可被发现，项目内 `.venv` 继续使用宿主的信任流程。
 4. **4 个独立构建系统与动态 `pytest` 测试树（`buildSystems: 1` 与 `buildProviders`）**
    - `python` 通过 `test.discoveryCommand` 启动 `python -I -B scripts/discover_tests.py`。宿主使用选定解释器和构建实例目录运行命令，并提供 `${outputFile}`。命令运行 `pytest --collect-only`，汇报函数、类方法和参数化用例的精确选择器。发现为空时写入有效的 `litheTestDiscovery` v0 空列表。选择器或报告超出契约限制时整次发现失败。pytest 缓存与报告位于宿主 `${workspaceStateDir}` 下的本次发现目录，由宿主在操作结束时清理。宿主负责取消并回收整个进程树，收集脚本保留 45 秒的 pytest 超时。

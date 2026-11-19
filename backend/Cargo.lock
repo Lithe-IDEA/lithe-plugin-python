@@ -105,7 +105,7 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 [[package]]
 name = "lithe-plugin-sdk"
 version = "0.4.0"
-source = "git+https://github.com/Lithe-IDEA/Lithe-core-rust.git?rev=e56af624d3f615982f90c6249f7aa43c9b3b218e#e56af624d3f615982f90c6249f7aa43c9b3b218e"
+source = "git+https://github.com/Lithe-IDEA/Lithe-core-rust.git?rev=509c2beed1b23b4d3fd1d6649a4e252982e34db2#509c2beed1b23b4d3fd1d6649a4e252982e34db2"
 dependencies = [
  "base64",
  "serde",

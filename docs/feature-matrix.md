@@ -22,10 +22,11 @@
 | 终端输出跳转 (`outputLinkMatchers`) | Python Traceback `File "...", line N` 点击定位源码与行号 | ✅ 已验证 | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/plugin.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
 | 新建项目向导 (`projectGenerators`) | `python-project`：选择并固定项目级 `python` 工具链（`pinAs: "project"`），可选 `none` / `venv (.venv)` / `uv (.venv)` 与示例代码生成（Windows 自动将 `python3` 命令切换为 `python`） | ✅ 已验证 | ⏳ pending（归档已校验） | ⏳ pending（Windows 清单 `python` 命令切换已校验） | ⏳ pending（归档已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/plugin.json`<br>`io.github.lithe-idea.python-support/templates/python/`<br>`scripts/package/archives.test.mjs`<br>`e2e/host/desktop/internal/projectgen/python_integration_test.go` |
 | 国际化 (`l10n`) | 英文默认文案 + `l10n/zh-Hans.json` 简体中文完整设置与分组翻译 | ✅ 已验证 | ⏳ pending（归档与 Core `settingsState` 已校验） | ⏳ pending（归档与 Core `settingsState` 已校验） | ⏳ pending（归档与 Core `settingsState` 已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/l10n/zh-Hans.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
-| 工具链提供者 (`litheToolchains` / `toolchains/query`) | 包内 Rust 后端在全局与项目上下文读取 Conda 登记、uv、pyenv、Poetry/Pipenv 环境以及项目版本声明。安装、要求与观察路径作为事实交回宿主验证。 | ✅ 已验证（兼容候选宿主） | ⏳ 归档已校验 | ⏳ 待 CI 与宿主验收 | ⏳ 待 CI 与宿主验收 | 2026-11-19（macOS ARM64，候选宿主） | `backend/src/discovery.rs`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
+| 工具链提供者 (`litheToolchains` / `toolchains/query`) | 包内 Rust 后端在全局与项目上下文读取 Conda 登记、uv、pyenv、Poetry/Pipenv 环境以及项目版本声明。Pipenv 默认环境按完整的 `Pipfile` 路径识别，所选解释器须满足同目录的项目版本约束。安装、要求与观察路径作为事实交回宿主验证。 | ✅ 已验证（兼容候选宿主） | ⏳ 归档已校验 | ⏳ 待宿主验收 | ⏳ 待宿主验收 | 2026-11-19（macOS ARM64，候选宿主） | `backend/src/discovery.rs`<br>`backend/src/discovery/project.rs`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
 
 ## 宿主版本与验证
 
 - 插件要求宿主声明 `toolchainProviders: 0` 和 `buildSystems: 1`。旧版桌面用于此前插件版本的回归。当前归档须在同时声明这两项能力的候选宿主上验收。
+- `e2e/host/lithe-host.json` 固定来自 Lithe 桌面 #2193 的兼容候选，包含已合入 #2192 的命令式测试发现。
 - 候选宿主测试使用实际安装的插件、Conda 登记表和外部解释器副本，覆盖项目要求变更后切换解释器、全局候选、原生项目解释器信任及包文件哈希。
 - 宿主按 Core 的文件事实校验安装。外部虚拟环境里指向环境外的 Python 链接不可作为提供者候选，项目内环境由宿主信任流程单独处理。

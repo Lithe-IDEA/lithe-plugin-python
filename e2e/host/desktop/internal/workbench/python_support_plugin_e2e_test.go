@@ -511,6 +511,9 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("detected build systems = %v, want [conda python ruff uv]", detectedIDs)
 	}
 
+	// Run Build and pytest as a user who explicitly trusted this fixture.
+	buildProject := &project{root: workspace}
+	buildProject.trust.codeAllowed.Store(true)
 	buildWsState := t.TempDir()
 	providerClient, err := buildprovider.Start(ctx, service.Backend, pluginbackend.StartRequest{
 		Manifest:                normalizedManifest,
@@ -544,6 +547,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		WorkspaceStateDirectory: buildWsState,
 		WorkspaceRoot:           workspace,
 		Tool:                    &pytestTool,
+		ProjectCodeAllowed:      buildProject.trust.allowed(),
 	})
 	if err != nil {
 		t.Fatalf("PlanBuildModel: %v", err)
@@ -610,7 +614,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	workbench := &App{kernel: kernel, plugins: service, store: appStore, text: i18n.For(i18n.English)}
 	discoveryOperation := core.NewOperation()
 	discoveryCtx := core.WithOrigin(ctx, core.Origin{Operation: discoveryOperation})
-	decodedDiscovery, err := workbench.buildTestDiscovery(discoveryCtx, &project{root: workspace}, instance, kernel, false)
+	decodedDiscovery, err := workbench.buildTestDiscovery(discoveryCtx, buildProject, instance, kernel, false)
 	if err != nil {
 		t.Fatalf("workbench command discovery: %v", err)
 	}
@@ -634,13 +638,14 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 
 	// 6c. Run that exact single discovered test via PlanBuildTest -> lithe/build/test -> DecodeBuildTestResults!
 	testPlan, err := kernel.PlanBuildTest(ctx, normalizedManifest, "python", core.BuildTestRequest{
-		Root:          ".",
-		WorkspaceRoot: workspace,
-		Project:       chosenTest.Project,
-		Target:        chosenTest.Target,
-		Suite:         chosenTest.Suite,
-		Case:          chosenTest.Case,
-		Projects:      []string{"."},
+		Root:               ".",
+		WorkspaceRoot:      workspace,
+		Project:            chosenTest.Project,
+		Target:             chosenTest.Target,
+		Suite:              chosenTest.Suite,
+		Case:               chosenTest.Case,
+		Projects:           []string{"."},
+		ProjectCodeAllowed: buildProject.trust.allowed(),
 	})
 	if err != nil {
 		t.Fatalf("PlanBuildTest: %v", err)

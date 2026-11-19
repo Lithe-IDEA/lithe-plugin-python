@@ -147,9 +147,10 @@ fn project_file(
         }
     }
     if let Some(source) = source(&pipfile, root)? {
-        let name = pipenv_name(directory);
+        let name = pipenv_name(directory, &source);
         if let Some(home) = choose(snapshot, |candidate| {
             candidate.names.contains(std::ffi::OsStr::new(&name))
+                && allows_version(&candidate.version)
         }) {
             statement(
                 snapshot,
@@ -226,10 +227,20 @@ fn statement(
     Ok(())
 }
 
-fn pipenv_name(directory: &Path) -> String {
+fn pipenv_name(directory: &Path, pipfile: &Path) -> String {
     let name = directory.file_name().unwrap_or_default().to_string_lossy();
-    let name: String = sanitize(&name).chars().take(42).collect();
-    let hash = Sha256::digest(directory.to_string_lossy().as_bytes());
+    let name: String = name
+        .replace(
+            [
+                ' ', '&', '$', '`', '!', '*', '@', '"', '(', ')', '[', ']', '\\', '\r', '\n', '\t',
+            ],
+            "_",
+        )
+        .chars()
+        .take(42)
+        .collect();
+    // Pipenv hashes the full Pipfile path. Poetry hashes the project directory.
+    let hash = Sha256::digest(pipfile.to_string_lossy().as_bytes());
     format!("{name}-{}", URL_SAFE_NO_PAD.encode(&hash[..6]))
 }
 
