@@ -1,76 +1,86 @@
 name: Release
 
 # Push a tag v<version> matching plugin.json to publish a GitHub Release.
-# Lithe Store's tracker picks up stable releases and opens index pull requests.
-# Tags listed in PRERELEASE_TAGS below are published as pre-releases, which the
-# tracker skips until a compatible Lithe desktop release is out.
+# Lithe Store automatically tracks stable releases of eligible plugins.
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
+    outputs:
+      exists: ${{ steps.release.outputs.exists }}
     steps:
-      - name: Check whether release already exists
-        id: check
+      - name: Check whether the release already exists
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $GITHUB_REF_NAME already exists; skipping workflow build."
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
+
+  package:
+    needs: check
+    if: needs.check.outputs.exists == 'false'
+    uses: ./.github/workflows/package.yml
+    with:
+      tag: ${{ github.ref_name }}
+
+  release:
+    needs: [check, package]
+    if: needs.check.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
       - uses: actions/checkout@v4
-        if: steps.check.outputs.exists != 'true'
       - uses: actions/setup-node@v4
-        if: steps.check.outputs.exists != 'true'
         with:
           node-version: 22
-      - name: Build 6 platform archives
-        if: steps.check.outputs.exists != 'true'
-        run: |
-          set -o pipefail
-          node scripts/package.mjs --expect-tag "$GITHUB_REF_NAME" | tee "$RUNNER_TEMP/checksums.txt"
-      - name: Verify release archives
-        if: steps.check.outputs.exists != 'true'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: python-support-archive-*
+          merge-multiple: true
+          path: dist
+      - name: Verify the six release archives
+        env:
+          LITHE_EXPECT_ALL_ARCHIVES: "1"
         run: node --test --test-timeout=60000 scripts/package/*.test.mjs
       - name: Publish GitHub Release
-        if: steps.check.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          PRERELEASE_TAGS: v0.1.0 v0.1.1
+          # v1.0.0 requires a host that advertises toolchainProviders 0.
+          PRERELEASE_TAGS: v0.1.0 v0.1.1 v1.0.0
         run: |
-          prerelease=false
+          release_flags=()
+          installation='Lithe Store 会在收录后提供此版本。打开 设置 → 插件 → 插件市场，搜索 Python Support。'
           for tag in $PRERELEASE_TAGS; do
-            if [[ "$tag" == "$GITHUB_REF_NAME" ]]; then prerelease=true; fi
+            if [[ "$tag" == "$GITHUB_REF_NAME" ]]; then
+              release_flags+=(--prerelease)
+              installation='下载对应平台的 ZIP。打开 设置 → 插件 → 从文件安装…，核对 SHA-256 后确认。'
+              break
+            fi
           done
+          notes="docs/releases/$GITHUB_REF_NAME.md"
+          test -s "$notes"
           {
-            echo "兼容性：按插件契约 v0（schemaVersion 0、pluginAPIVersion 0）构建，需要支持声明式插件契约 v0 与项目内工具环境（.venv）信任解析的新版 Lithe 桌面端（desktop-v* 预发布）。"
+            cat "$notes"
             echo
-            if [[ -s "docs/releases/$GITHUB_REF_NAME.md" ]]; then
-              cat "docs/releases/$GITHUB_REF_NAME.md"
-              echo
-            fi
-            if [[ "$prerelease" == true ]]; then
-              echo "安装：预发布版本，Lithe Store 自动追踪会跳过。下载对应平台的 ZIP，在 设置 → 插件 中点击 从文件安装…，选中 ZIP 后核对 SHA-256 并确认。"
-            else
-              echo "安装：Lithe Store（https://github.com/Lithe-IDEA/Lithe-store）收录后，可在 设置 → 插件 → 插件市场 中搜索 Python Support 并安装。"
-            fi
+            echo "$installation"
             echo
-            echo "SHA-256："
+            echo 'SHA-256'
+            echo
             echo '```'
-            sed 's#^dist/##' "$RUNNER_TEMP/checksums.txt"
+            (cd dist && sha256sum ./*.zip)
             echo '```'
           } > "$RUNNER_TEMP/notes.md"
-          release_flags=()
-          if [[ "$prerelease" == true ]]; then
-            release_flags+=(--prerelease)
-          fi
           gh release create "$GITHUB_REF_NAME" dist/*.zip --title "Python Support $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" "${release_flags[@]}"
