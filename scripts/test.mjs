@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Runs static contract checks, unit + protocol tests for scripts/{backend,build_model,build_provider,toolchain_provider}.py,
+// Runs static contract checks, unit + protocol tests for the Rust backend and Python build scripts,
 // and live end-to-end smoke tests against the unpacked plugin package (backend-resolved pyrefly launch with
 // external tools.python.executable injection and .venv fallback, toolchains/query, pytest --collect-only discovery
 // and JUnit XML execution, cancellation process-tree cleanup, project templates, and debugpy DAP launch),
@@ -12,6 +12,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -25,9 +26,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, normalize, resolve } from "node:path";
+import { basename, dirname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readZipEntries } from "./lib/archive.mjs";
+import { backendPath } from "./lib/backend.mjs";
 import { ASSET_PREFIX, manifestForPlatform, PACKAGE_ID, packagePlatforms, sha256File } from "./package.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -313,11 +315,21 @@ try {
       assert.equal(variant.schemaVersion, 0);
       assert.equal(variant.pluginAPIVersion, 0);
       assert.equal(variant.id, "io.github.lithe-idea.python-support");
-      assert.equal(variant.version, "0.2.0");
+      assert.equal(variant.version, sourceManifest.version);
       assert.equal(variant.vendor.id, "io.github.lithe-idea");
       assert.equal(variant.vendor.signatureRequirement, "none");
       assert.equal("commandInstallers" in variant, false, "must not declare commandInstallers");
-      assert.equal("toolchainProviders" in variant, false, "must omit toolchainProviders until desktop host declares it");
+      assert.deepEqual(variant.toolchainProviders, [{
+        id: "python",
+        displayName: "Python Environments",
+        tools: ["python"],
+        watchFiles: [
+          { pattern: ".python-version", reader: "compatible" },
+          { pattern: "pyproject.toml", reader: "native" },
+          { pattern: "Pipfile", reader: "native" },
+          { pattern: "poetry.lock", reader: "native" },
+        ],
+      }]);
       assert.equal("$schema" in variant, false, "plugin.json must not contain $schema");
       assert.deepEqual(Object.keys(variant.requires).sort(), [
         "backend",
@@ -330,6 +342,7 @@ try {
         "projectGenerators",
         "settings",
         "toolDefinitions",
+        "toolchainProviders",
       ]);
       for (const ver of Object.values(variant.requires)) {
         assert.equal(ver, 0);
@@ -341,17 +354,11 @@ try {
         "languageServer.launch",
         "process.build",
         "project.generate",
+        "toolchains.provide",
       ]);
 
       assert.deepEqual(variant.backend, {
-        launch: {
-          kind: "runtime",
-          tool: "python",
-          minimumVersion: "3.9",
-          runtimeArguments: ["-I", "-B"],
-          entry: "scripts/backend.py",
-        },
-        arguments: ["--state", "${stateDir}"],
+        launch: { kind: "packaged", path: backendPath(platform) },
       });
 
       const pyLang = variant.languages[0];
@@ -435,7 +442,7 @@ try {
   const beforeSnapshot = snapshotDirectoryHashes(unpackedPluginDir);
 
   const buildModelScript = join(unpackedPluginDir, "scripts", "build_model.py");
-  const backendScript = join(unpackedPluginDir, "scripts", "backend.py");
+  const backendExecutable = join(unpackedPluginDir, pluginManifest.backend.launch.path);
   const buildProviderScript = join(unpackedPluginDir, "scripts", "build_provider.py");
 
   await check("build_model.py discovers PEP 621 scripts, src/ packages, tests, and .venv/.conda exclusions", () => {
@@ -547,7 +554,7 @@ try {
     assert.ok(!missing.stderr.includes("secret-path-token-do-not-log"), "stderr must never echo raw paths");
   });
 
-  await check("backend.py negotiates litheLogging + litheFunctions, resolves Unix/Windows pyrefly launch, and injects external tools.python.executable into pyrefly LSP", async () => {
+  await check("The packaged SDK backend negotiates litheLogging + litheFunctions, resolves Unix/Windows pyrefly launch, and injects external tools.python.executable into pyrefly LSP", async () => {
     const stateDir = join(scratch, "backend-state");
     const wsStateDir = join(scratch, "backend-ws-state");
     const logDir = join(scratch, "backend-log");
@@ -565,7 +572,7 @@ try {
     mkdirSync(join(extSite, "external_env_pkg"), { recursive: true });
     writeFileSync(join(extSite, "external_env_pkg", "__init__.py"), "def magic_number() -> int:\n    return 7\n");
 
-    const child = spawn(pythonCmd, ["-I", "-B", backendScript, "--state", stateDir], {
+    const child = spawn(backendExecutable, [], {
       cwd: scratch,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -805,7 +812,7 @@ try {
       });
       const unknownMethodErr = await peer.waitFor((m) => m.id === 81, "unknown method error");
       assert.equal(unknownMethodErr.error?.code, -32601);
-      assert.equal(unknownMethodErr.error?.message, "The requested method is not supported.");
+      assert.ok(unknownMethodErr.error?.message, "unknown method must return a diagnostic");
       assert.ok(!unknownMethodErr.error.message.includes("secret"));
 
       peer.send({
@@ -820,7 +827,7 @@ try {
       });
       const unknownFnErr = await peer.waitFor((m) => m.id === 82, "unknown function error");
       assert.equal(unknownFnErr.error?.code, -32602);
-      assert.equal(unknownFnErr.error?.message, "The requested plugin function is not registered.");
+      assert.ok(unknownFnErr.error?.message, "unknown function must return a diagnostic");
       assert.ok(!unknownFnErr.error.message.includes("secret"));
 
       // 7. Clean shutdown + exit without creating any custom log files.
@@ -829,7 +836,7 @@ try {
       peer.send({ jsonrpc: "2.0", method: "exit", params: null });
       const exitCode = await peer.waitExit();
       assert.equal(exitCode, 0);
-      assert.deepEqual(readdirSync(logDir), [], "backend.py must create zero custom log files");
+      assert.deepEqual(readdirSync(logDir), [], "The SDK backend must create zero custom log files");
     } finally {
       await peer.closeAndKill();
     }
@@ -919,7 +926,7 @@ try {
     }
   });
 
-  await check("toolchain_provider.py answers toolchains/query for conda, uv, pyenv, Poetry, Pipenv, .python-version, and pyproject.toml", async () => {
+  await check("The packaged provider answers toolchains/query for conda, uv, pyenv, Poetry, Pipenv, .python-version, and pyproject.toml", async () => {
     const fakeHome = join(scratch, "fake-home");
     const condaEnvDir = join(scratch, "conda-envs", "ml-311");
     const uvPyDir = join(scratch, "uv-pythons", "cpython-3.12.6-macos-aarch64-none");
@@ -963,23 +970,25 @@ try {
     );
     writeFileSync(join(wsRoot, "Pipfile"), '[[source]]\nname = "pypi"\n');
 
-    // Compute pipenv prefix via python helper to create matching WORKON_HOME env.
-    const pipenvName = run(pythonCmd, [
-      "-I",
-      "-B",
-      "-c",
-      `import sys; sys.path.insert(0, ${JSON.stringify(join(unpackedPluginDir, "scripts"))}); from pathlib import Path; from toolchain_provider import _pipenv_virtualenv_prefix; print(_pipenv_virtualenv_prefix(Path(sys.argv[1]).resolve()))`,
-      wsRoot,
-    ]).trim();
+    const workspaceDirectory = realpathSync.native(wsRoot);
+    const workspaceHash = (path) => createHash("sha256").update(path).digest("base64url").slice(0, 8);
+    const pipenvName = `${basename(workspaceDirectory)}-${workspaceHash(workspaceDirectory)}`;
     const pipenvDir = join(workonRoot, pipenvName);
-    makeFakePythonHome(pipenvDir, "3.12.3", false);
+    makeFakePythonHome(pipenvDir, "3.12.3");
+    writeFileSync(join(wsRoot, "poetry.lock"), "");
+    const poetryRoot = join(scratch, "poetry");
+    const poetryProjectPath = process.platform === "win32" ? workspaceDirectory.toLowerCase() : workspaceDirectory;
+    const poetryDir = join(poetryRoot, `tc-demo-${workspaceHash(poetryProjectPath)}-py3.12`);
+    makeFakePythonHome(poetryDir, "3.12.1");
 
     const discoveryEnv = {
       HOME: fakeHome,
       USERPROFILE: fakeHome,
+      PATH: "",
       UV_PYTHON_INSTALL_DIR: dirname(uvPyDir),
       PYENV_ROOT: join(scratch, "pyenv-root"),
       WORKON_HOME: workonRoot,
+      POETRY_VIRTUALENVS_PATH: poetryRoot,
       CONDA_ENVS_PATH: "",
       CONDA_PREFIX: "",
     };
@@ -988,7 +997,7 @@ try {
     const inherited = Object.fromEntries(
       Object.entries(process.env).filter(([key]) => !(key.toUpperCase() in discoveryEnv)),
     );
-    const child = spawn(pythonCmd, ["-I", "-B", backendScript, "--state", join(scratch, "tc-state")], {
+    const child = spawn(backendExecutable, [], {
       cwd: scratch,
       env: { ...inherited, ...discoveryEnv },
       stdio: ["pipe", "pipe", "pipe"],
@@ -1011,21 +1020,24 @@ try {
       });
       await peer.waitFor((m) => m.id === 1 && "result" in m, "toolchain backend init");
 
-      peer.send({
-        jsonrpc: "2.0",
-        id: 2,
-        method: "toolchains/query",
-        params: {
-          operationID: "tc-op-1",
-          generation: 3,
-          providerID: "python",
-          authority: { kind: "local" },
-          tools: ["python"],
-          workspace: { rootID: "root-1", root: wsRoot, directory: "." },
-          context: { contextID: "ctx-tc", generation: 1 },
-        },
-      });
-      const reply = await peer.waitFor((m) => m.id === 2, "toolchains/query reply");
+      async function queryProject(id, operationID) {
+        peer.send({
+          jsonrpc: "2.0",
+          id,
+          method: "toolchains/query",
+          params: {
+            operationID,
+            generation: id + 1,
+            providerID: "python",
+            authority: { kind: "local" },
+            tools: ["python"],
+            workspace: { rootID: "root-1", root: wsRoot, directory: "." },
+            context: { contextID: "ctx-tc", generation: 1 },
+          },
+        });
+        return peer.waitFor((m) => m.id === id, "toolchains/query reply");
+      }
+      const reply = await queryProject(2, "tc-op-1");
       assert.equal(reply.result.operationID, "tc-op-1");
       assert.equal(reply.result.generation, 3);
       assert.equal(reply.result.providerID, "python");
@@ -1046,19 +1058,66 @@ try {
       assert.ok(homes.includes(expectedPath(uvPyDir)), "Expected UV_PYTHON_INSTALL_DIR installation");
       assert.ok(homes.includes(expectedPath(pyenvVerDir)), "Expected PYENV_ROOT installation");
       assert.ok(homes.includes(expectedPath(pipenvDir)), "Expected WORKON_HOME Pipenv installation");
+      assert.ok(homes.includes(expectedPath(poetryDir)), "Expected configured Poetry installation");
+      assert.ok(reply.result.watch.map(pathKey).includes(expectedPath(join(wsRoot, "poetry.lock"))));
       assert.equal(homes.includes(expectedPath(wsLocalVenv)), false, "Must NEVER return workspace-local .venv");
 
       const bySource = new Map(reply.result.statements.map((statement) => [pathKey(statement.source), statement]));
-      const pyVerStmt = bySource.get(expectedPath(join(wsRoot, ".python-version")));
-      assert.ok(pyVerStmt);
-      assert.equal(pathKey(pyVerStmt.installation), expectedPath(condaEnvDir));
-      const pyprojStmt = bySource.get(expectedPath(join(wsRoot, "pyproject.toml")));
-      assert.ok(pyprojStmt);
-      assert.equal(pathKey(pyprojStmt.installation), expectedPath(uvPyDir));
+      const versionPath = join(wsRoot, ".python-version");
+      const projectPath = join(wsRoot, "pyproject.toml");
+      const declarations = (response) => response.result.statements.filter((statement) => statement.kind === "declaration");
+      assert.equal(
+        declarations(reply).length,
+        1,
+        "The provider must return one version declaration per directory to avoid a Core providerConflict",
+      );
+      const [unmet] = declarations(reply);
+      assert.equal(pathKey(unmet.source), expectedPath(versionPath));
+      assert.equal(unmet.request, "3.11");
+      assert.equal(unmet.installation, null, "3.11 does not satisfy the project requirement");
+      for (const watched of [versionPath, projectPath]) {
+        assert.ok(reply.result.watch.map(pathKey).includes(expectedPath(watched)));
+      }
+
+      writeFileSync(versionPath, "3.12\n");
+      const [compatible] = declarations(await queryProject(6, "tc-op-compatible"));
+      assert.equal(pathKey(compatible.source), expectedPath(versionPath));
+      assert.equal(pathKey(compatible.installation), expectedPath(uvPyDir));
+
+      rmSync(versionPath);
+      const [projectOnly] = declarations(await queryProject(7, "tc-op-project-only"));
+      assert.equal(pathKey(projectOnly.source), expectedPath(projectPath));
+      assert.equal(pathKey(projectOnly.installation), expectedPath(uvPyDir));
       const pipfileStmt = bySource.get(expectedPath(join(wsRoot, "Pipfile")));
       assert.ok(pipfileStmt);
       assert.equal(pipfileStmt.kind, "environment");
       assert.equal(pathKey(pipfileStmt.installation), expectedPath(pipenvDir));
+
+      const poetryStmt = bySource.get(expectedPath(join(wsRoot, "poetry.lock")));
+      assert.ok(poetryStmt);
+      assert.equal(poetryStmt.kind, "environment");
+      assert.equal(pathKey(poetryStmt.installation), expectedPath(poetryDir));
+
+      assert.equal(peer.allReceived.some((m) => m.method === "lithe/log" && m.params?.operationId === "tc-op-1"), false,
+        "A successful discovery must not emit an INFO terminal event");
+
+      peer.send({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "toolchains/query",
+        params: {
+          operationID: "tc-op-global",
+          generation: 4,
+          providerID: "python",
+          authority: { kind: "local" },
+          tools: ["python"],
+          workspace: null,
+          context: null,
+        },
+      });
+      const global = await peer.waitFor((m) => m.id === 5, "global toolchain backend reply");
+      assert.deepEqual(global.result.statements, []);
+      assert.ok(global.result.installations.some((entry) => pathKey(entry.home) === expectedPath(condaEnvDir)));
 
       // Remote authority must return -32071 plugin.toolchain.authorityUnsupported.
       peer.send({
@@ -1069,7 +1128,7 @@ try {
           operationID: "tc-op-remote",
           generation: 4,
           providerID: "python",
-          authority: { kind: "remote", hostID: "ssh-box" },
+          authority: { kind: "remote", id: "ssh-box" },
           tools: ["python"],
           workspace: null,
           context: null,

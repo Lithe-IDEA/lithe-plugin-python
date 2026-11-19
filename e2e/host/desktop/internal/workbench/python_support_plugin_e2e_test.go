@@ -76,6 +76,13 @@ func toWindowsVariantManifest(t *testing.T, unixManifest []byte) []byte {
 	if err := json.Unmarshal(unixManifest, &doc); err != nil {
 		t.Fatal(err)
 	}
+	if backend, ok := doc["backend"].(map[string]any); ok {
+		if launch, ok := backend["launch"].(map[string]any); ok {
+			if path, ok := launch["path"].(string); ok && !strings.HasSuffix(path, ".exe") {
+				launch["path"] = path + ".exe"
+			}
+		}
+	}
 	generators, _ := doc["projectGenerators"].([]any)
 	for _, rawGen := range generators {
 		gen, _ := rawGen.(map[string]any)
@@ -135,6 +142,33 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+
+	providerHome := t.TempDir()
+	if canonical, err := filepath.EvalSymlinks(providerHome); err == nil {
+		providerHome = canonical
+	}
+	t.Setenv("HOME", providerHome)
+	t.Setenv("USERPROFILE", providerHome)
+	// Keep the provider's fixture independent of installed manager configurations.
+	for _, name := range []string{"APPDATA", "LOCALAPPDATA", "CONDA_ENVS_PATH", "CONDA_PREFIX", "UV_PYTHON_INSTALL_DIR", "PYENV_ROOT", "POETRY_VIRTUALENVS_PATH", "POETRY_CACHE_DIR", "WORKON_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"} {
+		t.Setenv(name, "")
+	}
+	registeredHomes := []string{
+		filepath.Join(providerHome, "registered-python-one"),
+		filepath.Join(providerHome, "registered-python-replacement"),
+	}
+	for _, home := range registeredHomes {
+		if out, err := exec.CommandContext(ctx, systemPython, "-m", "venv", "--copies", "--without-pip", home).CombinedOutput(); err != nil {
+			t.Fatalf("create regular-file external environment: %v\n%s", err, out)
+		}
+	}
+	registryDir := filepath.Join(providerHome, ".conda")
+	if err := os.MkdirAll(registryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(registryDir, "environments.txt"), []byte(strings.Join(registeredHomes, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	kernel := core.NewClient()
 	appStore := store.At(t.TempDir())
@@ -235,7 +269,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("unexpected l10n rejections: %+v", settingsState.Localization.Rejected)
 	}
 
-	// 4. Plan backend-resolved language server (Pyrefly), call real backend.py pyrefly.resolveLaunch
+	// 4. Plan backend-resolved language server (Pyrefly), call the packaged Pyrefly launch resolver
 	// with and without tools.python.executable, decode via Core, and run pyrefly --version.
 	stateDir := t.TempDir()
 	wsStateDir := t.TempDir()
@@ -685,8 +719,62 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("unexpected output links: %+v", links)
 	}
 
-	// 8. Verify .venv toolchain resolution (including workspace trust gating) AND Core toolchains.decodeReply
-	// validation of scripts/toolchain_provider.py output!
+	// 8. Drive the real host's declared provider before creating a project-local .venv.
+	providerHost, ok := any(service).(interface {
+		ToolchainOptions(string, toolchain.Options) toolchain.Options
+	})
+	if !ok {
+		t.Fatal("the pinned host lacks on-demand toolchain providers; use a compatible desktop revision")
+	}
+	service.Contexts.Open(workspace)
+	t.Cleanup(func() { service.Contexts.Close(workspace) })
+	manifestSet := []json.RawMessage{normalizedManifest}
+	const providerID = pythonSupportPluginID + ":python"
+	pinFile := filepath.Join(workspace, ".python-version")
+	for _, expected := range registeredHomes {
+		if err := os.WriteFile(pinFile, []byte(filepath.Base(expected)+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := toolchain.Load(ctx, kernel, workspace, ".", manifestSet,
+			providerHost.ToolchainOptions(workspace, toolchain.Options{Home: providerHome, Environment: map[string]string{}}))
+		if err != nil {
+			t.Fatalf("load provider toolchain: %v", err)
+		}
+		if len(snapshot.Tools) != 1 || snapshot.Tools[0].Effective == nil {
+			t.Fatalf("no effective project interpreter: %+v", snapshot.Tools)
+		}
+		selection := snapshot.Tools[0].Effective
+		if selection.Home == nil {
+			t.Fatalf("provider selection has no installation home: %+v", selection)
+		}
+		actual, actualErr := os.Stat(*selection.Home)
+		wanted, wantedErr := os.Stat(expected)
+		if actualErr != nil || wantedErr != nil || !os.SameFile(actual, wanted) || selection.Provider != providerID {
+			t.Fatalf("provider selection = %+v, want %s from %s", selection, expected, providerID)
+		}
+	}
+	global, err := toolchain.Load(ctx, kernel, "", ".", manifestSet,
+		providerHost.ToolchainOptions("", toolchain.Options{Global: true, Home: providerHome, Environment: map[string]string{}}))
+	if err != nil {
+		t.Fatalf("load global provider toolchains: %v", err)
+	}
+	if len(global.Tools) != 1 {
+		t.Fatalf("expected one global tool, got %+v", global.Tools)
+	}
+	for _, expected := range registeredHomes {
+		wanted, err := os.Stat(expected)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.ContainsFunc(global.Tools[0].Installations, func(installation core.ToolchainInstallation) bool {
+			actual, err := os.Stat(installation.Home)
+			return err == nil && os.SameFile(actual, wanted) && installation.Provider == providerID
+		}) {
+			t.Fatalf("global provider did not register %s: %+v", expected, global.Tools[0])
+		}
+	}
+
+	// Verify .venv resolution retains its project trust gate.
 	venvCmd := exec.CommandContext(ctx, systemPython, "-m", "venv", ".venv")
 	venvCmd.Dir = workspace
 	if out, err := venvCmd.CombinedOutput(); err != nil {
@@ -731,123 +819,6 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		if resolvedExec != expectedVenvPython {
 			t.Fatalf("trusted .venv resolution = %q, want literal path %q", resolvedExec, expectedVenvPython)
 		}
-	}
-
-	// Verify real Core toolchains.decodeReply accepts scripts/toolchain_provider.py query_python_toolchains output.
-	extUvRoot := t.TempDir()
-	if resolvedExt, evalErr := filepath.EvalSymlinks(extUvRoot); evalErr == nil {
-		extUvRoot = resolvedExt
-	}
-	extPyHome := filepath.Join(extUvRoot, "cpython-3.12.6")
-	extPyBinDir := filepath.Join(extPyHome, "bin")
-	extPyExe := filepath.Join(extPyBinDir, "python3")
-	if runtime.GOOS == "windows" {
-		extPyBinDir = filepath.Join(extPyHome, "Scripts")
-		extPyExe = filepath.Join(extPyBinDir, "python.exe")
-	}
-	if err := os.MkdirAll(extPyBinDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(extPyExe, []byte("#!/bin/sh\necho Python 3.12.6\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(extPyHome, "pyvenv.cfg"), []byte("version_info = 3.12.6\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	tcReqParams := map[string]any{
-		"operationID": "tc-core-e2e-1",
-		"generation":  1,
-		"providerID":  "python",
-		"authority":   map[string]any{"kind": "local"},
-		"tools":       []string{"python"},
-		"workspace":   map[string]any{"rootID": "ws-1", "root": workspace, "directory": "."},
-		"context":     map[string]any{"contextID": "ctx-e2e-1", "generation": 1},
-	}
-	tcReqParamsJSON, _ := json.Marshal(tcReqParams)
-	pySnippet := fmt.Sprintf(
-		"import json, sys; sys.path.insert(0, %q); from pathlib import Path; from lithe_rpc import CallContext, CancelToken, DiagnosticsReporter; from toolchain_provider import query_python_toolchains, TOOLCHAIN_PROVIDER_DECLARATION; params = json.loads(sys.argv[1]); ctx = CallContext(cancel_token=CancelToken(), diagnostics=DiagnosticsReporter(lambda _: None, lambda _: True), suppress_cb=lambda: None); out = query_python_toolchains(params, ctx, home_dir=Path(%q), environ={'UV_PYTHON_INSTALL_DIR': %q}); print(json.dumps({'decl': TOOLCHAIN_PROVIDER_DECLARATION, 'reply': out}))",
-		filepath.Join(installedDir, "scripts"),
-		extUvRoot,
-		extUvRoot,
-	)
-	tcOutBytes, err := exec.CommandContext(ctx, systemPython, "-I", "-B", "-c", pySnippet, string(tcReqParamsJSON)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("running toolchain_provider.py failed: %v\n%s", err, tcOutBytes)
-	}
-	var tcBundle struct {
-		Decl  json.RawMessage `json:"decl"`
-		Reply json.RawMessage `json:"reply"`
-	}
-	if err := json.Unmarshal(tcOutBytes, &tcBundle); err != nil {
-		t.Fatalf("unmarshaling toolchain_provider output: %v\n%s", err, tcOutBytes)
-	}
-
-	// Build an in-memory manifest variant declaring toolchainProviders + packaged backend so Core toolchains.decodeReply
-	// checks every field, path, installation, and statement emitted by toolchain_provider.py!
-	var tcManifestMap map[string]any
-	if err := json.Unmarshal(normalizedManifest, &tcManifestMap); err != nil {
-		t.Fatal(err)
-	}
-	reqMap, _ := tcManifestMap["requires"].(map[string]any)
-	reqMap["toolchainProviders"] = 0
-	perms, _ := tcManifestMap["permissions"].([]any)
-	tcManifestMap["permissions"] = append(perms, "toolchains.provide")
-	tcManifestMap["backend"] = map[string]any{
-		"launch": map[string]any{"kind": "packaged", "path": expectedPyreflyRel},
-	}
-	tcManifestMap["toolchainProviders"] = []any{tcBundle.Decl}
-	tcManifestBytes, _ := json.Marshal(tcManifestMap)
-	tcRegistryInput, err := toolchain.RegistryInput([]json.RawMessage{tcManifestBytes})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	pyprojectPath := filepath.Join(workspace, "pyproject.toml")
-	pyVerPath := filepath.Join(workspace, ".python-version")
-	condaTxtPath := filepath.Join(extUvRoot, ".conda", "environments.txt")
-	fsFacts := []core.ToolchainFileFact{
-		{Path: workspace, CanonicalPath: workspace, Kind: "directory"},
-		{Path: extUvRoot, CanonicalPath: extUvRoot, Kind: "directory"},
-		{Path: extPyHome, CanonicalPath: extPyHome, Kind: "directory"},
-		{Path: extPyExe, CanonicalPath: extPyExe, Kind: "file", Executable: true},
-		{Path: pyprojectPath, CanonicalPath: pyprojectPath, Kind: "file"},
-		{Path: pyVerPath, CanonicalPath: pyVerPath, Kind: "missing"},
-		{Path: condaTxtPath, CanonicalPath: condaTxtPath, Kind: "missing"},
-	}
-	wireReq, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      "req-1",
-		"method":  "toolchains/query",
-		"params":  tcReqParams,
-	})
-	wireResp, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      "req-1",
-		"result":  tcBundle.Reply,
-	})
-	var decodeReplyOutcome struct {
-		Status   string                     `json:"status"`
-		Error    *core.MarketplaceRejection `json:"error"`
-		Snapshot json.RawMessage            `json:"snapshot"`
-	}
-	if err := kernel.Execute(ctx, "toolchains.decodeReply", core.ToolchainQuery{
-		Registry:          tcRegistryInput,
-		PluginID:          pythonSupportPluginID,
-		Request:           wireReq,
-		Response:          wireResp,
-		CurrentGeneration: 1,
-		Filesystem:        fsFacts,
-		Platform:          toolchain.PlatformName(runtime.GOOS),
-		WorkspaceRoots:    []string{workspace},
-	}, &decodeReplyOutcome); err != nil {
-		t.Fatalf("toolchains.decodeReply failed: %v", err)
-	}
-	if decodeReplyOutcome.Status != "ok" {
-		t.Fatalf("toolchains.decodeReply rejected reply: status=%s err=%+v", decodeReplyOutcome.Status, decodeReplyOutcome.Error)
-	}
-	if !strings.Contains(string(decodeReplyOutcome.Snapshot), "3.12.6") {
-		t.Fatalf("expected decoded toolchain snapshot to include installation 3.12.6, got %s", decodeReplyOutcome.Snapshot)
 	}
 
 	// Shut down backend cleanly BEFORE checking package immutability so any shutdown write would be caught too!

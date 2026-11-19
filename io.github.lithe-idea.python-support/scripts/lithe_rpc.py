@@ -17,7 +17,6 @@ from typing import Any, Callable, Optional
 FUNCTIONS_VERSION = 0
 BUILD_VERSIONS = (1, 0)
 LOGGING_VERSION = 0
-TOOLCHAINS_VERSION = 0
 
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 MAX_INCOMING_FRAME_BYTES = 16 * 1024 * 1024
@@ -37,19 +36,6 @@ ERROR_SERVER_NOT_INITIALIZED = -32002
 ERROR_REQUEST_FAILED = -32000
 ERROR_REQUEST_CANCELLED = -32800
 
-TOOLCHAIN_ERROR_CODES = {
-    "plugin.toolchain.methodUnavailable": -32601,
-    "plugin.toolchain.invalidParams": -32602,
-    "plugin.toolchain.cancelled": -32800,
-    "plugin.toolchain.permissionDenied": -32070,
-    "plugin.toolchain.authorityUnsupported": -32071,
-    "plugin.toolchain.timeout": -32072,
-    "plugin.toolchain.providerUnavailable": -32073,
-    "plugin.toolchain.invalidReply": -32074,
-    "plugin.toolchain.limitExceeded": -32075,
-    "plugin.toolchain.unsafePath": -32076,
-    "plugin.toolchain.operationExpired": -32077,
-}
 
 KNOWN_LOGGING_OPERATIONS = frozenset({
     "initialize",
@@ -154,28 +140,6 @@ class PluginError(Exception):
         super().__init__(message)
         self.code = code
         self.user_message = bounded_utf8(message, MAX_ERROR_MESSAGE_BYTES)
-
-
-class ToolchainQueryError(Exception):
-    """Typed JSON-RPC error matching shared/plugins/contract/v1/toolchains/README.md."""
-
-    def __init__(
-        self,
-        stable_code: str,
-        message: str,
-        operation_id: str,
-        provider_id: str,
-        details: Optional[dict[str, Any]] = None,
-    ) -> None:
-        if stable_code not in TOOLCHAIN_ERROR_CODES:
-            raise ValueError(f"Unknown toolchain error code: {stable_code!r}")
-        super().__init__(message)
-        self.stable_code = stable_code
-        self.rpc_code = TOOLCHAIN_ERROR_CODES[stable_code]
-        self.user_message = bounded_utf8(message, MAX_ERROR_MESSAGE_BYTES) or "Toolchain query failed."
-        self.operation_id = operation_id
-        self.provider_id = provider_id
-        self.details = details
 
 
 class FramingError(Exception):
@@ -366,7 +330,7 @@ class DiagnosticsReporter:
 
 
 class CallContext:
-    """Per-request execution context passed to function, build, and toolchain handlers."""
+    """Per-request execution context passed to function and build handlers."""
 
     def __init__(
         self,
@@ -468,7 +432,7 @@ def encode_frame(payload: dict[str, Any]) -> bytes:
 class JsonRpcServer:
     """
     Pure-Python Lithe plugin backend / build provider stdio JSON-RPC server.
-    Implements litheLogging 0, litheFunctions 0, litheBuild 0/1, and litheToolchains 0.
+    Implements litheLogging 0, litheFunctions 0, and litheBuild 0/1.
     """
 
     def __init__(self, *, name: str, version: str = "0.2.0") -> None:
@@ -476,7 +440,6 @@ class JsonRpcServer:
         self.version = version
         self._functions: dict[str, Callable[[dict[str, Any], CallContext], Any]] = {}
         self._build_handlers: dict[str, Callable[[dict[str, Any], CallContext], Any]] = {}
-        self._toolchain_providers: dict[str, Callable[[dict[str, Any], CallContext], Any]] = {}
         self._quiet_success: set[str] = set()
         self._initialize_hooks: list[Callable[[dict[str, Any]], None]] = []
         self._shutdown_hooks: list[Callable[[], None]] = []
@@ -487,7 +450,6 @@ class JsonRpcServer:
         self._early_diagnostics: list[dict[str, Any]] = []
         self._functions_version: Optional[int] = None
         self._build_version: Optional[int] = None
-        self._selected_toolchain_providers: set[str] = set()
         self.initialize_params: Optional[dict[str, Any]] = None
 
         self._write_lock = threading.Lock()
@@ -513,15 +475,6 @@ class JsonRpcServer:
         self._build_handlers[method] = handler
         return self
 
-    def toolchain_provider(
-        self,
-        provider_id: str,
-        handler: Callable[[dict[str, Any], CallContext], Any],
-    ) -> "JsonRpcServer":
-        if not _PROVIDER_ID_RE.match(provider_id):
-            raise ValueError(f"Invalid toolchain provider ID: {provider_id!r}")
-        self._toolchain_providers[provider_id] = handler
-        return self
 
     def suppress_success_diagnostics(self, operation: str) -> "JsonRpcServer":
         if operation not in KNOWN_LOGGING_OPERATIONS and operation not in self._functions:
@@ -711,9 +664,7 @@ class JsonRpcServer:
                 return
             self._submit(req_id, self._invoke_build, method, params)
             return
-        if method == "toolchains/query" and self._selected_toolchain_providers:
-            self._submit(req_id, self._invoke_toolchain_query, params)
-            return
+
 
         self._respond(
             req_id,
@@ -789,14 +740,6 @@ class JsonRpcServer:
 
         self._functions_version = FUNCTIONS_VERSION if _offers(offered.get("litheFunctions"), FUNCTIONS_VERSION) else None
 
-        self._selected_toolchain_providers = set()
-        tc_offer = offered.get("litheToolchains")
-        if _offers(tc_offer, TOOLCHAINS_VERSION) and isinstance(tc_offer, dict):
-            raw_providers = tc_offer.get("providers")
-            if isinstance(raw_providers, list) and len(raw_providers) <= 8:
-                for p_id in raw_providers:
-                    if isinstance(p_id, str) and p_id in self._toolchain_providers:
-                        self._selected_toolchain_providers.add(p_id)
 
         try:
             for hook in self._initialize_hooks:
@@ -830,11 +773,7 @@ class JsonRpcServer:
                 "version": self._functions_version,
                 "functions": [{"id": fn_id} for fn_id in sorted(self._functions)],
             }
-        if self._selected_toolchain_providers:
-            experimental["litheToolchains"] = {
-                "version": TOOLCHAINS_VERSION,
-                "providers": sorted(self._selected_toolchain_providers),
-            }
+
 
         with self._state_lock:
             self._phase = "ready"
@@ -1001,108 +940,7 @@ class JsonRpcServer:
             emit_logging=True,
         )
 
-    def _invoke_toolchain_query(self, req_id: Any, token: CancelToken, raw_params: Any) -> None:
-        if not isinstance(raw_params, dict):
-            self._respond(
-                req_id,
-                error={
-                    "code": ERROR_INVALID_PARAMS,
-                    "message": "Malformed toolchain query params.",
-                    "data": {
-                        "code": "plugin.toolchain.invalidParams",
-                        "operationID": "",
-                        "providerID": "",
-                    },
-                },
-            )
-            return
 
-        provider_id = raw_params.get("providerID") if isinstance(raw_params.get("providerID"), str) else ""
-        op_id = raw_params.get("operationID") if isinstance(raw_params.get("operationID"), str) else ""
-        if provider_id not in self._selected_toolchain_providers:
-            self._respond(
-                req_id,
-                error={
-                    "code": ERROR_METHOD_NOT_FOUND,
-                    "message": "The requested toolchain provider is not active on this session.",
-                    "data": {
-                        "code": "plugin.toolchain.methodUnavailable",
-                        "operationID": op_id,
-                        "providerID": provider_id,
-                    },
-                },
-            )
-            return
-
-        handler = self._toolchain_providers[provider_id]
-        ctx = CallContext(
-            cancel_token=token,
-            diagnostics=self._make_diagnostics(request_operation_id(op_id, req_id)),
-            suppress_cb=lambda: None,
-            operation_id=op_id,
-        )
-        try:
-            token.raise_if_cancelled()
-            result = handler(raw_params, ctx)
-            token.raise_if_cancelled()
-            self._respond(req_id, result=result)
-        except CancelledError:
-            self._respond(
-                req_id,
-                error={
-                    "code": ERROR_REQUEST_CANCELLED,
-                    "message": "The toolchain query was cancelled.",
-                    "data": {
-                        "code": "plugin.toolchain.cancelled",
-                        "operationID": op_id,
-                        "providerID": provider_id,
-                    },
-                },
-            )
-        except ToolchainQueryError as tc_err:
-            data_obj: dict[str, Any] = {
-                "code": tc_err.stable_code,
-                "operationID": tc_err.operation_id,
-                "providerID": tc_err.provider_id,
-            }
-            if tc_err.details is not None:
-                data_obj["details"] = tc_err.details
-            self._respond(
-                req_id,
-                error={
-                    "code": tc_err.rpc_code,
-                    "message": tc_err.user_message,
-                    "data": data_obj,
-                },
-            )
-        except Exception as exc:
-            if token.cancelled:
-                self._respond(
-                    req_id,
-                    error={
-                        "code": ERROR_REQUEST_CANCELLED,
-                        "message": "The toolchain query was cancelled.",
-                        "data": {
-                            "code": "plugin.toolchain.cancelled",
-                            "operationID": op_id,
-                            "providerID": provider_id,
-                        },
-                    },
-                )
-            else:
-                self._write_stderr_category("toolchain_query_failed", type(exc).__name__)
-                self._respond(
-                    req_id,
-                    error={
-                        "code": -32073,
-                        "message": "The toolchain provider failed unexpectedly.",
-                        "data": {
-                            "code": "plugin.toolchain.providerUnavailable",
-                            "operationID": op_id,
-                            "providerID": provider_id,
-                        },
-                    },
-                )
     def _execute_tracked(
         self,
         *,
