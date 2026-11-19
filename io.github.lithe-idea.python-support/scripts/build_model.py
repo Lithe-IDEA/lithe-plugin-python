@@ -406,6 +406,18 @@ def _module_name_for_file(rel_posix: str, has_src_dir: bool):
     return ".".join(parts), app_dir
 
 
+def project_name_for_dir(instance_dir: Path) -> str:
+    for filename, parse in (
+        ("pyproject.toml", _parse_pyproject),
+        ("setup.cfg", _parse_setup_cfg),
+        ("setup.py", _parse_setup_py),
+    ):
+        name = parse(instance_dir / filename)["name"]
+        if name:
+            return name
+    return instance_dir.name or "python-project"
+
+
 def build_model_with_diagnostics(root_dir: Path) -> tuple[dict, list[str]]:
     root_real = root_dir.resolve()
     py_meta = _parse_pyproject(root_dir / "pyproject.toml")

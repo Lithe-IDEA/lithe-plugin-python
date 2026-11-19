@@ -344,8 +344,8 @@ try {
         "toolDefinitions",
         "toolchainProviders",
       ]);
-      for (const ver of Object.values(variant.requires)) {
-        assert.equal(ver, 0);
+      for (const [capability, version] of Object.entries(variant.requires)) {
+        assert.equal(version, capability === "buildSystems" ? 1 : 0);
       }
       assert.deepEqual([...variant.permissions].sort(), [
         "backend.launch",
@@ -396,7 +396,12 @@ try {
       assert.equal(pyBuild.provider.mayUseNetwork, false);
       assert.deepEqual(pyBuild.model, { source: "provider" });
       assert.equal(pyBuild.test.source, "provider");
-      assert.equal(pyBuild.test.discovery, true);
+      assert.equal("discovery" in pyBuild.test, false);
+      assert.deepEqual(pyBuild.test.discoveryCommand, {
+        arguments: ["-I", "-B", "${pluginDir}/scripts/discover_tests.py", "${outputFile}", "${root}", "${optionArguments}"],
+        executesProjectCode: true,
+        mayUseNetwork: false,
+      });
       assert.deepEqual(pyBuild.test.filters, ["suite", "case"]);
       assert.deepEqual(pyBuild.test.arguments, []);
       assert.deepEqual(pyBuild.test.results, {
@@ -1150,7 +1155,7 @@ try {
     }
   });
 
-  await check("build_provider.py executes model (with degraded/recovered), pytest --collect-only discovery, pytest JUnit XML test runs, runEntrypoints, and cancellation cleanup", async () => {
+  await check("The packaged discovery command collects pytest selectors and the provider runs them exactly, reports JUnit, and handles cancellation", async () => {
     const pytestExecutable = resolvePytestRuntime();
     const noPytestExec = ensureNoPytestPython(scratch);
 
@@ -1162,10 +1167,17 @@ try {
     // Start with an intentionally malformed pyproject.toml to verify degraded -> recovered!
     writeFileSync(join(wsDir, "pyproject.toml"), "[project\nname = 'broken'\n");
     writeFileSync(join(wsDir, "worker.py"), 'if __name__ == "__main__":\n    print("run worker")\n');
+    writeFileSync(join(wsDir, "conftest.py"), [
+      "def pytest_sessionstart(session):",
+      "    if session.config.option.collectonly:",
+      "        session.config.cache.set('lithe/discovery-test', True)",
+      "",
+    ].join("\n"));
     writeFileSync(
       join(wsDir, "tests", "test_calc.py"),
       [
         "import pytest",
+        "import worker",
         "",
         "@pytest.mark.parametrize('x,expected', [(2, 6), (3, 9)])",
         "def test_scale(x, expected):",
@@ -1177,7 +1189,26 @@ try {
       ].join("\n") + "\n",
     );
 
-    const child = spawn(pythonCmd, ["-I", "-B", buildProviderScript, "--cache", cacheDir], {
+    const discoveryCommand = pluginManifest.buildSystems.find(({ id }) => id === "python").test.discoveryCommand;
+    assert.ok(discoveryCommand, "The installed plugin must declare a test discovery command");
+    function discover(label, { cwd = wsDir, root = ".", executable = pytestExecutable, options = [] } = {}) {
+      const attemptDir = join(cacheDir, label);
+      mkdirSync(attemptDir);
+      const report = join(attemptDir, "tests.json");
+      const args = discoveryCommand.arguments.flatMap((value) => value === "${optionArguments}"
+        ? options
+        : value.replace("${pluginDir}", unpackedPluginDir).replace("${outputFile}", report).replace("${root}", root));
+      const result = spawnSync(executable, args, {
+        cwd,
+        encoding: "utf8",
+        timeout: COMMAND_TIMEOUT_MS,
+        windowsHide: true,
+      });
+      if (result.error) throw result.error;
+      return { ...result, report };
+    }
+
+    const child = spawn(pythonCmd, ["-I", "-B", buildProviderScript], {
       cwd: wsDir,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -1267,63 +1298,52 @@ try {
         "Expected recovered pyproject_restored log",
       );
 
-      // 2. lithe/build/discoverTests via pytest --collect-only.
-      peer.send({
-        jsonrpc: "2.0",
-        id: 4,
-        method: "lithe/build/discoverTests",
-        params: {
-          operationID: "op-discover-1",
-          buildSystemID: "python",
-          root: ".",
-          tool: { executable: pytestExecutable },
-          options: {},
-          optionArguments: [],
-          environment: {},
-        },
-      });
-      const discResp = await peer.waitFor((m) => m.id === 4, "discoverTests response");
-      assert.equal(discResp.result.format, "litheTestDiscovery");
-      assert.equal(discResp.result.version, 0);
-      assert.equal(existsSync(join(wsDir, ".pytest_cache")), false, "discoverTests must write cache to workspaceStateDir, not workspace");
+      // 2. Run the packaged command with the host's output path and project cwd.
+      const discovered = discover("collected");
+      assert.equal(discovered.status, 0, discovered.stdout + discovered.stderr);
+      const discovery = JSON.parse(readFileSync(discovered.report, "utf8"));
+      assert.equal(discovery.format, "litheTestDiscovery");
+      assert.equal(discovery.version, 0);
+      assert.equal(existsSync(join(wsDir, ".pytest_cache")), false);
+      assert.equal(existsSync(join(dirname(discovered.report), "pytest-cache")), true);
 
-      const discoveredCases = discResp.result.tests.map((t) => `${t.suite}::${t.case}`).sort();
+      const discoveredCases = discovery.tests.map((t) => `${t.suite}::${t.case}`).sort();
       assert.deepEqual(discoveredCases, [
         "tests/test_calc.py::TestCalc::test_add",
         "tests/test_calc.py::test_scale[2-6]",
         "tests/test_calc.py::test_scale[3-9]",
       ]);
-      for (const item of discResp.result.tests) {
+      for (const item of discovery.tests) {
         assert.deepEqual(item.project, { name: "calc-suite", path: "." });
       }
 
-      // 3. Missing pytest returns controlled PluginError python.pytestUnavailable + operationFailed ERROR.
-      peer.send({
-        jsonrpc: "2.0",
-        id: 5,
-        method: "lithe/build/discoverTests",
-        params: {
-          operationID: "op-discover-missing",
-          buildSystemID: "python",
-          root: ".",
-          tool: { executable: noPytestExec },
-          options: {},
-          optionArguments: [],
-          environment: {},
-        },
+      // 3. Empty projects complete, while missing pytest and failed collection publish no report.
+      const missingPytest = discover("missing-pytest", { executable: noPytestExec });
+      assert.equal(missingPytest.status, 197);
+      assert.match(missingPytest.stderr, /pytest unavailable/);
+      assert.equal(existsSync(missingPytest.report), false);
+
+      const nested = join(wsDir, "nested project");
+      mkdirSync(nested);
+      const empty = discover("empty", { cwd: nested, root: "nested project" });
+      assert.equal(empty.status, 0, empty.stdout + empty.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(empty.report, "utf8")), {
+        format: "litheTestDiscovery", version: 0, tests: [],
       });
-      const missingPytest = await peer.waitFor((m) => m.id === 5, "missing pytest error");
-      assert.equal(missingPytest.error?.code, -32000);
-      assert.equal(missingPytest.error?.data?.code, "python.pytestUnavailable");
-      assert.ok(
-        peer.allReceived.some(
-          (m) =>
-            m.method === "lithe/log" &&
-            m.params?.operationId === "op-discover-missing" &&
-            m.params?.kind === "operationFailed" &&
-            m.params?.code === "python.pytestUnavailable",
-        ),
-      );
+      writeFileSync(join(nested, "test_nested.py"), "def test_nested():\n    assert True\n");
+      const nestedDiscovery = discover("nested", { cwd: nested, root: "nested project" });
+      assert.equal(nestedDiscovery.status, 0, nestedDiscovery.stdout + nestedDiscovery.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(nestedDiscovery.report, "utf8")).tests, [{
+        suite: "test_nested.py", case: "test_nested", project: { name: "nested project", path: "nested project" },
+      }]);
+      rmSync(nested, { recursive: true });
+
+      const brokenTest = join(wsDir, "tests", "test_collection_error.py");
+      writeFileSync(brokenTest, "def test_broken():\n    assert (\n");
+      const collectionError = discover("collection-error");
+      assert.equal(collectionError.status, 2);
+      assert.equal(existsSync(collectionError.report), false);
+      rmSync(brokenTest);
 
       // 4. Execute a single discovered parameterized test via lithe/build/test and verify progress + JUnit XML.
       peer.send({
@@ -1359,11 +1379,15 @@ try {
       assert.match(junitXml, /test_scale\[2-6\]/);
 
       writeFileSync(join(wsDir, "tests", "test_names.py"), [
-        "import pytest",
         "def test_add():",
         "    assert True",
         "def test_additional():",
         "    assert True",
+        "",
+      ].join("\n"));
+      const oversizedTest = join(wsDir, "tests", "test_long_id.py");
+      writeFileSync(oversizedTest, [
+        "import pytest",
         "@pytest.mark.parametrize('value', [pytest.param(1, id='é' * 600)])",
         "def test_long_id(value):",
         "    assert value == 1",
@@ -1382,22 +1406,19 @@ try {
       assert.equal(caseOnly.error?.data?.code, "python.invalidTestSelector");
       assert.equal(readFileSync(junitXmlPath, "utf8"), junitXml);
 
-      peer.send({
-        jsonrpc: "2.0", id: 69, method: "lithe/build/discoverTests",
-        params: {
-          operationID: "op-discover-long-id",
-          buildSystemID: "python", root: ".", tool: { executable: pytestExecutable },
-          options: {}, optionArguments: [], environment: {},
-        },
-      });
-      const withLongId = await peer.waitFor((m) => m.id === 69, "discover with oversized UTF-8 test ID");
+      const withLongId = discover("oversized-id");
+      assert.notEqual(withLongId.status, 0);
+      assert.match(withLongId.stderr, /invalid or oversized test selectors/);
+      assert.equal(existsSync(withLongId.report), false, "An oversized UTF-8 ID must fail the whole discovery");
+      rmSync(oversizedTest);
+      const withDoctest = discover("doctest", { options: ["--doctest-glob=test_notes.txt"] });
+      assert.equal(withDoctest.status, 0, withDoctest.stdout + withDoctest.stderr);
+      const tests = JSON.parse(readFileSync(withDoctest.report, "utf8")).tests;
       assert.deepEqual(
-        withLongId.result.tests.filter(({ suite }) => suite === "tests/test_names.py").map(({ case: name }) => name).sort(),
+        tests.filter(({ suite }) => suite === "tests/test_names.py").map(({ case: name }) => name).sort(),
         ["test_add", "test_additional"],
       );
-      assert.ok(peer.allReceived.some((m) => m.method === "lithe/log"
-        && m.params?.operationId === "op-discover-long-id" && m.params?.code === "test_discovery_truncated"));
-      const doctest = withLongId.result.tests.find(({ suite }) => suite === "test_notes.txt");
+      const doctest = tests.find(({ suite }) => suite === "test_notes.txt");
       assert.ok(doctest, "pytest must discover a root-level doctest");
       peer.send({
         jsonrpc: "2.0", id: 70, method: "lithe/build/test",
@@ -1538,7 +1559,7 @@ try {
       );
 
       // 6. $/cancelRequest terminates active pytest subprocess tree cleanly with zero orphan processes!
-      const pidFile = join(scratch, "slow-collect.pid");
+      const pidFile = join(scratch, "slow-test.pid");
       writeFileSync(
         join(wsDir, "tests", "test_blocking.py"),
         [
@@ -1553,12 +1574,13 @@ try {
       peer.send({
         jsonrpc: "2.0",
         id: 8,
-        method: "lithe/build/discoverTests",
+        method: "lithe/build/test",
         params: {
-          operationID: "op-discover-cancel",
+          operationID: "op-test-cancel",
           buildSystemID: "python",
           root: ".",
           tool: { executable: pytestExecutable },
+          suite: "tests/test_blocking.py",
           options: {},
           optionArguments: [],
           environment: {},
@@ -1574,10 +1596,10 @@ try {
       assert.ok(Number.isInteger(childPid) && childPid > 0);
 
       peer.send({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id: 8 } });
-      const cancelResp = await peer.waitFor((m) => m.id === 8, "cancelled discoverTests response", 10_000);
+      const cancelResp = await peer.waitFor((m) => m.id === 8, "cancelled test response", 10_000);
       assert.equal(cancelResp.error?.code, -32800);
       assert.equal(
-        peer.allReceived.some((m) => m.method === "lithe/log" && m.params?.operationId === "op-discover-cancel"),
+        peer.allReceived.some((m) => m.method === "lithe/log" && m.params?.operationId === "op-test-cancel"),
         false,
         "Cancelled requests must NOT emit operationFinished or operationFailed logs",
       );

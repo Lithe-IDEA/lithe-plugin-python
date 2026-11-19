@@ -101,6 +101,7 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
       `${PACKAGE_ID}/scripts/windows_job.py`,
       `${PACKAGE_ID}/scripts/build_model.py`,
       `${PACKAGE_ID}/scripts/build_provider.py`,
+      `${PACKAGE_ID}/scripts/discover_tests.py`,
       `${PACKAGE_ID}/scripts/debugpy_adapter.py`,
       `${PACKAGE_ID}/vendor/debugpy/adapter/__main__.py`,
       `${PACKAGE_ID}/vendor/debugpy/ThirdPartyNotices.txt`,
@@ -123,6 +124,10 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
     assert.deepEqual(manifest.backend, { launch: { kind: "packaged", path: backendPath(archive.platform) } });
     assert.deepEqual(manifest.toolchainProviders, baseManifest.toolchainProviders);
     assert.equal(manifest.requires.toolchainProviders, 0);
+    assert.deepEqual(
+      manifest.buildSystems.find(({ id }) => id === "python").test,
+      baseManifest.buildSystems.find(({ id }) => id === "python").test,
+    );
     const isWindows = archive.platform.startsWith("windows-");
     const pyreflyServer = manifest.languageServers.find((s) => s.languageID === "python");
     assert.deepEqual(pyreflyServer.launch, {

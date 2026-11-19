@@ -13,7 +13,7 @@
   "requires": {
     "backend": 0,
     "buildProviders": 0,
-    "buildSystems": 0,
+    "buildSystems": 1,
     "debugAdapters": 0,
     "languageServers": 0,
     "languages": 0,
@@ -503,7 +503,6 @@
           "runtimeArguments": ["-I", "-B"],
           "entry": "scripts/build_provider.py"
         },
-        "arguments": ["--cache", "${workspaceStateDir}"],
         "executesProjectCode": true,
         "mayUseNetwork": false
       },
@@ -639,7 +638,18 @@
         "scopes": ["workspace", "project", "target"],
         "targetTags": ["test"],
         "filters": ["suite", "case"],
-        "discovery": true,
+        "discoveryCommand": {
+          "arguments": [
+            "-I",
+            "-B",
+            "${pluginDir}/scripts/discover_tests.py",
+            "${outputFile}",
+            "${root}",
+            "${optionArguments}"
+          ],
+          "executesProjectCode": true,
+          "mayUseNetwork": false
+        },
         "arguments": [],
         "results": {
           "decoder": "junitXml",
