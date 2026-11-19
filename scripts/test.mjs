@@ -286,7 +286,7 @@ async function check(name, body) {
   }
 }
 
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), "lithe-python-test-")));
+const scratch = realpathSync.native(mkdtempSync(join(tmpdir(), "lithe-python-test-")));
 let unpackedPluginDir = null;
 
 try {
@@ -1042,16 +1042,19 @@ try {
       assert.equal(reply.result.generation, 3);
       assert.equal(reply.result.providerID, "python");
 
-      // Python and Node may preserve different drive letter and directory
-      // casing for a real path on Windows. Compare native path identities.
+      // Rust and Node may preserve different drive letter and directory casing
+      // on Windows. Resolve candidate homes and statement sources separately.
       const pathKey = (path) => {
         const nativePath = normalize(path);
         return process.platform === "win32" ? nativePath.toLowerCase() : nativePath;
       };
       const expectedPath = (path) => pathKey(realpathSync.native(path));
-      assert.ok(
-        reply.result.watch.map(pathKey).includes(expectedPath(condaRegistry)),
-        "Expected toolchain discovery to read the fixture home",
+      const watch = reply.result.watch.map(pathKey);
+      // The registry watch uses the configured home path so it still works
+      // when conda has yet to create the registry file.
+      assert.deepEqual(
+        watch.filter((path) => basename(path) === "environments.txt"),
+        [pathKey(condaRegistry)],
       );
       const homes = reply.result.installations.map((installation) => pathKey(installation.home));
       assert.ok(homes.includes(expectedPath(condaEnvDir)), "Expected ~/.conda/environments.txt installation");
@@ -1059,7 +1062,7 @@ try {
       assert.ok(homes.includes(expectedPath(pyenvVerDir)), "Expected PYENV_ROOT installation");
       assert.ok(homes.includes(expectedPath(pipenvDir)), "Expected WORKON_HOME Pipenv installation");
       assert.ok(homes.includes(expectedPath(poetryDir)), "Expected configured Poetry installation");
-      assert.ok(reply.result.watch.map(pathKey).includes(expectedPath(join(wsRoot, "poetry.lock"))));
+      assert.ok(watch.includes(expectedPath(join(wsRoot, "poetry.lock"))));
       assert.equal(homes.includes(expectedPath(wsLocalVenv)), false, "Must NEVER return workspace-local .venv");
 
       const bySource = new Map(reply.result.statements.map((statement) => [pathKey(statement.source), statement]));
@@ -1076,7 +1079,7 @@ try {
       assert.equal(unmet.request, "3.11");
       assert.equal(unmet.installation, null, "3.11 does not satisfy the project requirement");
       for (const watched of [versionPath, projectPath]) {
-        assert.ok(reply.result.watch.map(pathKey).includes(expectedPath(watched)));
+        assert.ok(watch.includes(expectedPath(watched)));
       }
 
       writeFileSync(versionPath, "3.12\n");
