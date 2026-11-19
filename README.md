@@ -112,7 +112,7 @@ node --test --test-timeout=60000 scripts/package/*.test.mjs
 cargo test --locked --manifest-path backend/Cargo.toml
 node scripts/test.mjs
 
-# 使用 e2e/host/lithe-host.json 固定的兼容桌面候选
+# 使用 e2e/host/lithe-host.json 固定的兼容桌面主线提交
 node scripts/e2e-host.mjs
 
 # 也可使用另一个兼容的本地检出和提交
