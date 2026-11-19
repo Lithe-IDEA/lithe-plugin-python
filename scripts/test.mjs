@@ -345,7 +345,7 @@ try {
         "toolchainProviders",
       ]);
       for (const [capability, version] of Object.entries(variant.requires)) {
-        assert.equal(version, capability === "buildSystems" ? 1 : 0);
+        assert.equal(version, ["buildSystems", "languages"].includes(capability) ? 1 : 0);
       }
       assert.deepEqual([...variant.permissions].sort(), [
         "backend.launch",
@@ -362,7 +362,25 @@ try {
       });
 
       const pyLang = variant.languages[0];
-      assert.equal("shebang" in pyLang, false);
+      const firstLine = new RegExp(pyLang.firstLineMatch);
+      for (const line of [
+        "#!/usr/bin/python",
+        "#!/usr/bin/env python3",
+        "#!/usr/bin/env -S python3.13 -I",
+        "#!/opt/venv/bin/python3.13t",
+        "#!/usr/bin/env pypy3",
+      ]) {
+        assert.match(line, firstLine);
+      }
+      for (const line of [
+        "#!/usr/bin/env bash",
+        "#!/usr/bin/env python-wrapper",
+        "#!/usr/bin/python3.13.exe",
+        "#!/usr/bin/env node python3",
+        "# Mention #!/usr/bin/env python3",
+      ]) {
+        assert.doesNotMatch(line, firstLine);
+      }
       assert.deepEqual(pyLang.fileExtensions, ["py", "pyi", "pyw"]);
       assert.deepEqual(pyLang.dependencies.projectDependencyPaths, [".venv", "venv", ".conda"]);
 

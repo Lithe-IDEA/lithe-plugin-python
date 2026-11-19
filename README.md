@@ -9,7 +9,7 @@ Python language support plugin for Lithe (`schemaVersion: 0`, `pluginAPIVersion:
 ## 核心能力（Capabilities）
 
 1. **语言与编辑器基础（`languages: python`）**
-   - 识别 `.py`、`.pyi`、`.pyw`，配置 `#` 行注释与括号/引号自动配对，声明 `pyproject.toml` / `setup.py` / `setup.cfg` / `requirements.txt` / `Pipfile` / `pyrefly.toml` 项目标记及 `.venv` / `venv` / `.conda` 项目依赖目录。
+   - 识别 `.py`、`.pyi`、`.pyw`，以及首行指定 Python 解释器的无后缀脚本（需要宿主支持 `languages: 1`），配置 `#` 行注释与括号/引号自动配对，声明 `pyproject.toml` / `setup.py` / `setup.cfg` / `requirements.txt` / `Pipfile` / `pyrefly.toml` 项目标记及 `.venv` / `venv` / `.conda` 项目依赖目录。
 2. **后端解析的语言服务器启动与解释器自动注入（`backend` + `languageServers: python` / Pyrefly `1.4.1`）**
    - 插件包内的 Rust 后端直接启动 Pyrefly，无需先找到 Python。宿主会传入可用于自动启动的解释器路径，缺失时由 Pyrefly 按自身规则发现项目环境。构建、测试与调试仍用宿主选择的 Python。
    - 构建期按平台固定版本与 SHA-256 打包 `pyrefly 1.4.1`（Unix：`bin/pyrefly`，Windows：`bin/pyrefly.exe`），每个包也包含同一目标架构的 `bin/lithe-python-backend`（Windows 为 `.exe`）。
@@ -112,7 +112,7 @@ node --test --test-timeout=60000 scripts/package/*.test.mjs
 cargo test --locked --manifest-path backend/Cargo.toml
 node scripts/test.mjs
 
-# 使用 e2e/host/lithe-host.json 固定的兼容桌面主线提交
+# 使用 e2e/host/lithe-host.json 固定的兼容桌面提交
 node scripts/e2e-host.mjs
 
 # 也可使用另一个兼容的本地检出和提交
