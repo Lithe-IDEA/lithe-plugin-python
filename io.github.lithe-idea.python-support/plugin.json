@@ -2,7 +2,7 @@
   "schemaVersion": 0,
   "id": "io.github.lithe-idea.python-support",
   "displayName": "Python Support",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "vendor": {
     "id": "io.github.lithe-idea",
     "displayName": "Lithe Community",
@@ -11,6 +11,8 @@
   "repository": "https://github.com/Lithe-IDEA/lithe-plugin-python",
   "pluginAPIVersion": 0,
   "requires": {
+    "backend": 0,
+    "buildProviders": 0,
     "buildSystems": 0,
     "debugAdapters": 0,
     "languageServers": 0,
@@ -22,6 +24,7 @@
   },
   "requiresTools": ["python"],
   "permissions": [
+    "backend.launch",
     "debug.attach",
     "debug.launch",
     "languageServer.launch",
@@ -36,6 +39,16 @@
     "onDebug:debugpy",
     "onLanguage:python"
   ],
+  "backend": {
+    "launch": {
+      "kind": "runtime",
+      "tool": "python",
+      "minimumVersion": "3.9",
+      "runtimeArguments": ["-I", "-B"],
+      "entry": "scripts/backend.py"
+    },
+    "arguments": ["--state", "${stateDir}"]
+  },
   "languages": [
     {
       "id": "python",
@@ -61,7 +74,7 @@
           "environment.yml",
           "environment.yaml"
         ],
-        "projectDependencyPaths": [".venv", "venv"]
+        "projectDependencyPaths": [".venv", "venv", ".conda"]
       },
       "configuration": {
         "lineComment": "#",
@@ -85,7 +98,7 @@
       "id": "pythonExecutable",
       "type": "file",
       "title": "Python executable override",
-      "description": "Explicit path to the Python interpreter for build, run, and pytest commands. Leave empty to resolve automatically from the Python toolchain (.venv, venv, VIRTUAL_ENV, PATH, or discovered installations).",
+      "description": "Explicit path to the Python interpreter for build, run, and pytest commands. Leave empty to resolve automatically from the Python toolchain (.venv, venv, .conda, VIRTUAL_ENV, PATH, or discovered conda / uv / pyenv installations).",
       "default": "",
       "effect": "reload",
       "page": { "buildSystemID": "python" },
@@ -179,11 +192,10 @@
       "languageID": "python",
       "languageIdentifier": "python",
       "launch": {
-        "kind": "packaged",
-        "path": "bin/pyrefly"
+        "kind": "backend",
+        "function": "pyrefly.resolveLaunch",
+        "timeoutMilliseconds": 30000
       },
-      "arguments": ["lsp"],
-      "validationArguments": ["--version"],
       "workspaceConfiguration": {
         "python": {
           "pyrefly": {
@@ -221,6 +233,59 @@
       ],
       "discovery": [
         {
+          "root": { "kind": "environment", "variable": "UV_PYTHON_INSTALL_DIR" },
+          "pattern": "*"
+        },
+        {
+          "root": { "kind": "environment", "variable": "XDG_DATA_HOME" },
+          "pattern": "uv/python/*",
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "root": { "kind": "home" },
+          "pattern": ".local/share/uv/python/*",
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "root": { "kind": "environment", "variable": "APPDATA" },
+          "pattern": "uv/data/python/*",
+          "platforms": ["windows"]
+        },
+        {
+          "root": { "kind": "environment", "variable": "PYENV_ROOT" },
+          "pattern": "versions/*"
+        },
+        {
+          "root": { "kind": "home" },
+          "pattern": ".pyenv/versions/*",
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "root": { "kind": "home" },
+          "pattern": ".pyenv/pyenv-win/versions/*",
+          "platforms": ["windows"]
+        },
+        {
+          "root": { "kind": "environment", "variable": "CONDA_ENVS_PATH" },
+          "pattern": "*"
+        },
+        {
+          "root": { "kind": "environment", "variable": "CONDA_PREFIX" },
+          "pattern": "envs/*"
+        },
+        {
+          "root": { "kind": "environment", "variable": "WORKON_HOME" },
+          "pattern": "*"
+        },
+        {
+          "root": { "kind": "home" },
+          "pattern": "*conda*/envs/*"
+        },
+        {
+          "root": { "kind": "home" },
+          "pattern": "miniforge*/envs/*"
+        },
+        {
           "root": { "kind": "absolute", "path": "/opt/homebrew/opt" },
           "pattern": "python@*/libexec",
           "platforms": ["macos"]
@@ -236,65 +301,9 @@
           "platforms": ["macos"]
         },
         {
-          "root": { "kind": "absolute", "path": "/" },
-          "pattern": "usr",
-          "platforms": ["linux"]
-        },
-        {
-          "root": { "kind": "absolute", "path": "/usr" },
-          "pattern": "local",
-          "platforms": ["linux"]
-        },
-        {
           "root": { "kind": "environment", "variable": "LOCALAPPDATA" },
           "pattern": "Programs/Python/*",
           "platforms": ["windows"]
-        },
-        {
-          "root": { "kind": "home" },
-          "pattern": ".pyenv/versions/*",
-          "platforms": ["macos", "linux"]
-        },
-        {
-          "root": { "kind": "home" },
-          "pattern": ".pyenv/pyenv-win/versions/*",
-          "platforms": ["windows"]
-        },
-        {
-          "root": { "kind": "home" },
-          "pattern": ".local/share/uv/python/*",
-          "platforms": ["macos", "linux"]
-        },
-        {
-          "root": { "kind": "environment", "variable": "APPDATA" },
-          "pattern": "uv/data/python/*",
-          "platforms": ["windows"]
-        },
-        {
-          "root": { "kind": "home" },
-          "pattern": "*conda*"
-        },
-        {
-          "root": { "kind": "home" },
-          "pattern": "*conda*/envs/*"
-        },
-        {
-          "root": { "kind": "home" },
-          "pattern": "miniforge*"
-        },
-        {
-          "root": { "kind": "home" },
-          "pattern": "miniforge*/envs/*"
-        },
-        {
-          "root": { "kind": "absolute", "path": "/opt" },
-          "pattern": "*conda*",
-          "platforms": ["macos", "linux"]
-        },
-        {
-          "root": { "kind": "absolute", "path": "/opt" },
-          "pattern": "*conda*/envs/*",
-          "platforms": ["macos", "linux"]
         }
       ],
       "commands": ["python3", "python"],
@@ -374,6 +383,33 @@
           "platforms": ["windows"]
         },
         {
+          "id": "dot-conda-python3",
+          "kind": "projectFile",
+          "path": ".conda/bin/python3",
+          "home": ".conda",
+          "projectKind": "environment",
+          "requires": [".conda/conda-meta/history"],
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "id": "dot-conda-python",
+          "kind": "projectFile",
+          "path": ".conda/bin/python",
+          "home": ".conda",
+          "projectKind": "environment",
+          "requires": [".conda/conda-meta/history"],
+          "platforms": ["macos", "linux"]
+        },
+        {
+          "id": "dot-conda-windows",
+          "kind": "projectFile",
+          "path": ".conda/python.exe",
+          "home": ".conda",
+          "projectKind": "environment",
+          "requires": [".conda/conda-meta/history"],
+          "platforms": ["windows"]
+        },
+        {
           "id": "project-request",
           "kind": "toolchain",
           "scope": "project"
@@ -448,19 +484,20 @@
         },
         "minimumVersion": "3.9"
       },
-      "model": {
-        "source": "command",
-        "arguments": [
-          "-I",
-          "-B",
-          "${pluginDir}/scripts/build_model.py",
-          "${root}",
-          "${outputFile}"
-        ],
-        "output": "outputFile",
-        "decoder": "litheBuildModel",
-        "executesProjectCode": false,
+      "provider": {
+        "launch": {
+          "kind": "runtime",
+          "tool": "python",
+          "minimumVersion": "3.9",
+          "runtimeArguments": ["-I", "-B"],
+          "entry": "scripts/build_provider.py"
+        },
+        "arguments": ["--cache", "${workspaceStateDir}"],
+        "executesProjectCode": true,
         "mayUseNetwork": false
+      },
+      "model": {
+        "source": "provider"
       },
       "tasks": [
         {
@@ -587,32 +624,12 @@
         }
       ],
       "test": {
+        "source": "provider",
         "scopes": ["workspace", "project", "target"],
         "targetTags": ["test"],
         "filters": ["suite", "case"],
-        "arguments": [
-          "-m",
-          "pytest",
-          "--junitxml=.pytest_cache/lithe-junit.xml",
-          {
-            "value": "${target.property:directory}",
-            "when": ["targetSelected", "noSuiteSelected"]
-          },
-          {
-            "value": "${test.suite}",
-            "when": "suiteSelected"
-          },
-          {
-            "value": "-k",
-            "when": "caseSelected"
-          },
-          {
-            "value": "${test.case}",
-            "when": "caseSelected"
-          },
-          "${optionArguments}",
-          "${userArguments}"
-        ],
+        "discovery": true,
+        "arguments": [],
         "results": {
           "decoder": "junitXml",
           "reports": [".pytest_cache/lithe-junit.xml"]
@@ -641,7 +658,7 @@
         "watch": ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"]
       },
       "layout": {
-        "excluded": [".venv", "venv"],
+        "excluded": [".venv", "venv", ".conda"],
         "hiddenDirectoryNames": [
           "__pycache__",
           ".mypy_cache",

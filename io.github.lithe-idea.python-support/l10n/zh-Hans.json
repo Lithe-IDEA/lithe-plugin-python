@@ -3,7 +3,7 @@
   "settings": {
     "pythonExecutable": {
       "title": "Python 解释器覆盖路径",
-      "description": "显式指定用于构建、运行和 pytest 测试的 Python 解释器路径。留空时自动使用 Python 工具链解析结果（依次查找 .venv、venv、VIRTUAL_ENV、PATH 与已发现安装）。"
+      "description": "显式指定用于构建、运行和 pytest 测试的 Python 解释器路径。留空时自动使用 Python 工具链解析结果（依次查找 .venv、venv、.conda、VIRTUAL_ENV、PATH 与已发现的 conda / uv / pyenv 安装）。"
     },
     "typeCheckingMode": {
       "title": "类型检查模式",

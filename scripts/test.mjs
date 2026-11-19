@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-// Runs static contract checks, unit tests for scripts/build_model.py, and live
-// end-to-end smoke tests against the unpacked plugin package (pyrefly --version,
-// pyrefly lsp with .venv resolution, project template rendering, debugpy DAP launch),
+// Runs static contract checks, unit + protocol tests for scripts/{backend,build_model,build_provider,toolchain_provider}.py,
+// and live end-to-end smoke tests against the unpacked plugin package (backend-resolved pyrefly launch with
+// external tools.python.executable injection and .venv fallback, toolchains/query, pytest --collect-only discovery
+// and JUnit XML execution, cancellation process-tree cleanup, project templates, and debugpy DAP launch),
 // asserting 100% file-list and SHA-256 immutability of the installed plugin directory.
 //
-// PYTHON selects the Python executable (default python3 on Unix, python on Windows).
+// PYTHON selects the base Python executable (default python3 on Unix, python on Windows).
 // LITHE_TEST_PLUGIN_DIR tests an already-unpacked archive directory; when unset,
 // scripts/test.mjs packages (if needed) and unpacks the current platform archive
 // under a temporary path containing spaces, matching Lithe's plugin install layout.
@@ -24,7 +25,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readZipEntries } from "./lib/archive.mjs";
 import { ASSET_PREFIX, manifestForPlatform, PACKAGE_ID, packagePlatforms, sha256File } from "./package.mjs";
@@ -49,6 +50,11 @@ function detectHostPlatform() {
   return `${osPart}-${archPart}`;
 }
 
+function fileUri(absPath) {
+  const norm = absPath.replace(/\\/g, "/");
+  return new URL(`file://${norm.startsWith("/") ? "" : "/"}${norm}`).href;
+}
+
 function run(command, args, { cwd, env = process.env } = {}) {
   const result = spawnSync(command, args, {
     cwd,
@@ -67,6 +73,53 @@ function run(command, args, { cwd, env = process.env } = {}) {
     );
   }
   return result.stdout;
+}
+
+function hasPytest(executable, extraEnv = {}) {
+  if (!executable) return false;
+  const res = spawnSync(executable, ["-I", "-B", "-c", "import pytest"], {
+    env: { ...process.env, ...extraEnv },
+    stdio: "ignore",
+    timeout: 8_000,
+    windowsHide: true,
+  });
+  if (res.status === 0) return true;
+  // Re-check without -I in case pytest is installed in user site-packages or PYTHONPATH.
+  const resUser = spawnSync(executable, ["-B", "-c", "import pytest"], {
+    env: { ...process.env, ...extraEnv },
+    stdio: "ignore",
+    timeout: 8_000,
+    windowsHide: true,
+  });
+  return resUser.status === 0;
+}
+
+function resolvePytestRuntime() {
+  const executable = process.env.PYTEST_PYTHON ?? pythonCmd;
+  assert.ok(hasPytest(executable), "Install pytest in PYTHON or set PYTEST_PYTHON to an interpreter with pytest");
+  return run(executable, ["-B", "-c", "import sys; print(sys.executable)"]).trim();
+}
+
+/** Creates an isolated virtualenv that is guaranteed NOT to have `pytest` installed. */
+function ensureNoPytestPython(scratchDir) {
+  if (!hasPytest(pythonCmd)) {
+    return run(pythonCmd, ["-B", "-c", "import sys; print(sys.executable)"]).trim();
+  }
+  const bareVenv = join(scratchDir, "bare-no-pytest-venv");
+  run(pythonCmd, ["-m", "venv", "--without-pip", bareVenv]);
+  return process.platform === "win32"
+    ? join(bareVenv, "Scripts", "python.exe")
+    : join(bareVenv, "bin", "python3");
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function unpackZipToDir(zipPath, destRoot) {
@@ -101,42 +154,13 @@ function snapshotDirectoryHashes(rootDir) {
   return Object.fromEntries(map);
 }
 
-function setDirectoryTreeReadOnly(rootDir, readOnly) {
-  if (process.platform === "win32") return;
-  const dirs = [];
-  function walk(currentDir) {
-    dirs.push(currentDir);
-    for (const name of readdirSync(currentDir)) {
-      const abs = join(currentDir, name);
-      const stat = lstatSync(abs);
-      if (stat.isDirectory()) {
-        if (!readOnly) chmodSync(abs, 0o755);
-        walk(abs);
-      } else if (stat.isFile()) {
-        const execBit = (stat.mode & 0o111) !== 0;
-        if (readOnly) {
-          chmodSync(abs, execBit ? 0o555 : 0o444);
-        } else {
-          chmodSync(abs, execBit ? 0o755 : 0o644);
-        }
-      }
-    }
-  }
-  if (!readOnly) chmodSync(rootDir, 0o755);
-  walk(rootDir);
-  if (readOnly) {
-    for (const dir of dirs.reverse()) {
-      chmodSync(dir, 0o555);
-    }
-  }
-}
-
 /** Sends framing-based JSON-RPC / DAP messages over stdio with bounded timeout. */
 class FramedStdioPeer {
   constructor(child) {
     this.child = child;
     this.buffer = Buffer.alloc(0);
     this.messages = [];
+    this.allReceived = [];
     this.waiters = [];
     this.stderr = "";
 
@@ -149,6 +173,7 @@ class FramedStdioPeer {
     });
     child.on("close", () => {
       for (const waiter of this.waiters.splice(0)) {
+        clearTimeout(waiter.timer);
         waiter.reject(new Error(`Process exited early. stderr:\n${this.stderr}`));
       }
     });
@@ -161,13 +186,14 @@ class FramedStdioPeer {
       const header = this.buffer.subarray(0, sep).toString("ascii");
       const match = /Content-Length:\s*(\d+)/i.exec(header);
       if (!match) {
-        throw new Error(`Missing Content-Length header: ${header}`);
+        throw new Error(`Non-protocol stdout output or missing Content-Length header: ${header}`);
       }
       const length = Number.parseInt(match[1], 10);
       const bodyStart = sep + 4;
       if (this.buffer.length < bodyStart + length) return;
       const payload = JSON.parse(this.buffer.subarray(bodyStart, bodyStart + length).toString("utf8"));
       this.buffer = this.buffer.subarray(bodyStart + length);
+      this.allReceived.push(payload);
       let consumed = false;
       for (let i = 0; i < this.waiters.length; i += 1) {
         if (this.waiters[i].predicate(payload)) {
@@ -211,6 +237,21 @@ class FramedStdioPeer {
     });
   }
 
+  async waitExit(timeoutMs = 5_000) {
+    if (this.child.exitCode !== null || this.child.signalCode !== null) {
+      return this.child.exitCode;
+    }
+    return new Promise((resolvePromise, rejectPromise) => {
+      const timer = setTimeout(() => {
+        rejectPromise(new Error(`Timed out waiting for process exit. stderr:\n${this.stderr}`));
+      }, timeoutMs);
+      this.child.once("close", (code) => {
+        clearTimeout(timer);
+        resolvePromise(code);
+      });
+    });
+  }
+
   async closeAndKill(timeoutMs = 5_000) {
     if (this.child.exitCode !== null || this.child.signalCode !== null) return;
     await new Promise((resolvePromise) => {
@@ -245,7 +286,6 @@ async function check(name, body) {
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "lithe-python-test-")));
 let unpackedPluginDir = null;
-let madeReadOnly = false;
 
 try {
   const sourceManifest = JSON.parse(readFileSync(join(ROOT, PACKAGE_ID, "plugin.json"), "utf8"));
@@ -267,19 +307,21 @@ try {
 
   const pluginManifest = JSON.parse(readFileSync(join(unpackedPluginDir, "plugin.json"), "utf8"));
 
-  await check("Unix and Windows plugin.json + zh-Hans.json satisfy contract invariants", () => {
+  await check("Unix and Windows plugin.json + zh-Hans.json satisfy M3 contract invariants", () => {
     for (const platform of Object.keys(lock.pyrefly.platforms)) {
       const variant = manifestForPlatform(sourceManifest, platform, lock);
       assert.equal(variant.schemaVersion, 0);
       assert.equal(variant.pluginAPIVersion, 0);
       assert.equal(variant.id, "io.github.lithe-idea.python-support");
+      assert.equal(variant.version, "0.2.0");
       assert.equal(variant.vendor.id, "io.github.lithe-idea");
       assert.equal(variant.vendor.signatureRequirement, "none");
       assert.equal("commandInstallers" in variant, false, "must not declare commandInstallers");
+      assert.equal("toolchainProviders" in variant, false, "must omit toolchainProviders until desktop host declares it");
       assert.equal("$schema" in variant, false, "plugin.json must not contain $schema");
-      assert.equal("description" in variant, false, "plugin.json must not contain unknown top-level description");
-      assert.equal("license" in variant, false, "plugin.json must not contain unknown top-level license");
       assert.deepEqual(Object.keys(variant.requires).sort(), [
+        "backend",
+        "buildProviders",
         "buildSystems",
         "debugAdapters",
         "languageServers",
@@ -289,22 +331,80 @@ try {
         "settings",
         "toolDefinitions",
       ]);
+      for (const ver of Object.values(variant.requires)) {
+        assert.equal(ver, 0);
+      }
+      assert.deepEqual([...variant.permissions].sort(), [
+        "backend.launch",
+        "debug.attach",
+        "debug.launch",
+        "languageServer.launch",
+        "process.build",
+        "project.generate",
+      ]);
+
+      assert.deepEqual(variant.backend, {
+        launch: {
+          kind: "runtime",
+          tool: "python",
+          minimumVersion: "3.9",
+          runtimeArguments: ["-I", "-B"],
+          entry: "scripts/backend.py",
+        },
+        arguments: ["--state", "${stateDir}"],
+      });
 
       const pyLang = variant.languages[0];
-      assert.equal("shebang" in pyLang, false, "languages[0] must not declare shebang");
+      assert.equal("shebang" in pyLang, false);
       assert.deepEqual(pyLang.fileExtensions, ["py", "pyi", "pyw"]);
+      assert.deepEqual(pyLang.dependencies.projectDependencyPaths, [".venv", "venv", ".conda"]);
 
       const pyTool = variant.toolDefinitions[0];
       assert.equal("pathPrepend" in pyTool, false, "toolDefinitions[0] must omit unsafe pathPrepend");
-      assert.ok(pyTool.discovery.length <= 16, "discovery rules must fit Core limit of 16");
+      assert.equal(pyTool.discovery.length, 16, "discovery rules must fit Core limit of 16");
+      const envVars = pyTool.discovery
+        .filter((d) => d.root.kind === "environment")
+        .map((d) => d.root.variable)
+        .sort();
+      assert.deepEqual(envVars, [
+        "APPDATA",
+        "CONDA_ENVS_PATH",
+        "CONDA_PREFIX",
+        "LOCALAPPDATA",
+        "PYENV_ROOT",
+        "UV_PYTHON_INSTALL_DIR",
+        "WORKON_HOME",
+        "XDG_DATA_HOME",
+      ]);
       assert.deepEqual(pyTool.launch, ["${executable}", "${runtimeArguments}", "${entry}", "${arguments}"]);
 
       assert.deepEqual(
         variant.buildSystems.map((b) => b.id),
         ["python", "uv", "conda", "ruff"],
       );
+      const pyBuild = variant.buildSystems[0];
+      assert.equal(pyBuild.provider.launch.entry, "scripts/build_provider.py");
+      assert.deepEqual(pyBuild.provider.launch.runtimeArguments, ["-I", "-B"]);
+      assert.equal(pyBuild.provider.executesProjectCode, true);
+      assert.equal(pyBuild.provider.mayUseNetwork, false);
+      assert.deepEqual(pyBuild.model, { source: "provider" });
+      assert.equal(pyBuild.test.source, "provider");
+      assert.equal(pyBuild.test.discovery, true);
+      assert.deepEqual(pyBuild.test.filters, ["suite", "case"]);
+      assert.deepEqual(pyBuild.test.arguments, []);
+      assert.deepEqual(pyBuild.test.results, {
+        decoder: "junitXml",
+        reports: [".pytest_cache/lithe-junit.xml"],
+      });
 
       const pyServer = variant.languageServers[0];
+      assert.deepEqual(pyServer.launch, {
+        kind: "backend",
+        function: "pyrefly.resolveLaunch",
+        timeoutMilliseconds: 30000,
+      });
+      assert.equal("arguments" in pyServer, false);
+      assert.equal("validationArguments" in pyServer, false);
       assert.equal("pythonPath" in (pyServer.workspaceConfiguration.python ?? {}), false);
 
       const debugAdapter = variant.debugAdapters[0];
@@ -331,17 +431,19 @@ try {
   });
 
   // Snapshot unpacked plugin directory while keeping it writable (matching Windows and
-  // user-writable plugin directories) so any stray __pycache__ write by a child process
-  // such as debugpy/launcher is caught immediately instead of masked by POSIX 0555!
+  // user-writable plugin directories) so any stray __pycache__ or log file write is caught!
   const beforeSnapshot = snapshotDirectoryHashes(unpackedPluginDir);
 
   const buildModelScript = join(unpackedPluginDir, "scripts", "build_model.py");
+  const backendScript = join(unpackedPluginDir, "scripts", "backend.py");
+  const buildProviderScript = join(unpackedPluginDir, "scripts", "build_provider.py");
 
-  await check("build_model.py discovers PEP 621 scripts, src/ packages, tests, and .venv exclusions", () => {
+  await check("build_model.py discovers PEP 621 scripts, src/ packages, tests, and .venv/.conda exclusions", () => {
     const proj = join(scratch, "case-pep621");
     mkdirSync(join(proj, "src", "demo_pkg"), { recursive: true });
     mkdirSync(join(proj, "tests"), { recursive: true });
     mkdirSync(join(proj, ".venv", "bin"), { recursive: true });
+    mkdirSync(join(proj, ".conda", "conda-meta"), { recursive: true });
     writeFileSync(
       join(proj, "pyproject.toml"),
       [
@@ -373,12 +475,12 @@ try {
     assert.ok(byName["demo_pkg"], "expected src/demo_pkg/__main__.py target");
     assert.ok(byName["tests"], "expected tests target");
     assert.deepEqual(model.contentRoots, [
+      { path: ".conda", kind: "excluded" },
       { path: ".venv", kind: "excluded" },
       { path: "src", kind: "source" },
       { path: "tests", kind: "testSource" },
     ]);
 
-    // Execute the generated entrypoint runner to verify it invokes demo_pkg.cli:main without editable install.
     run(pythonCmd, ["-I", "-B", "-c", byName["demo-cli"].properties.runner], { cwd: proj });
   });
 
@@ -399,14 +501,8 @@ try {
       join(proj, "api.py"),
       `open(${JSON.stringify(canary)}, "w").write("bad")\nfrom fastapi import FastAPI\napp = FastAPI()\ndef create_app():\n    return FastAPI()\n`,
     );
-    writeFileSync(
-      join(proj, "web.py"),
-      "from flask import Flask\napp = Flask(__name__)\n",
-    );
-    writeFileSync(
-      join(proj, "worker.py"),
-      'def run():\n    pass\nif __name__ == "__main__":\n    run()\n',
-    );
+    writeFileSync(join(proj, "web.py"), "from flask import Flask\napp = Flask(__name__)\n");
+    writeFileSync(join(proj, "worker.py"), 'def run():\n    pass\nif __name__ == "__main__":\n    run()\n');
     writeFileSync(join(proj, "mypkg", "__init__.py"), "");
     writeFileSync(join(proj, "mypkg", "__main__.py"), "print('hi')\n");
 
@@ -425,16 +521,10 @@ try {
     assert.deepEqual(byName["mypkg"].tags, ["application", "module"]);
     assert.deepEqual(byName["worker.py"].tags, ["application", "script"]);
 
-    // Verify nested-instance invocation where host sets cwd = <workspace>/services/sub and passes ${root} = "services/sub".
+    // Verify vendored tomli fallback when stdlib tomllib is unavailable (Python 3.9/3.10 simulation).
     const nested = join(scratch, "workspace-nested", "services", "sub");
     mkdirSync(nested, { recursive: true });
     writeFileSync(join(nested, "pyproject.toml"), '[project]\nname = "nested-svc"\nversion = "0.1.0"\n');
-    const nestedOut = join(scratch, "nested-out.json");
-    run(pythonCmd, ["-I", "-B", buildModelScript, "services/sub", nestedOut], { cwd: nested });
-    const nestedModel = JSON.parse(readFileSync(nestedOut, "utf8"));
-    assert.equal(nestedModel.projects[0].name, "nested-svc");
-
-    // Verify vendored tomli fallback when stdlib tomllib is unavailable (Python 3.9/3.10 simulation).
     const tomliOut = join(scratch, "tomli-fallback-out.json");
     run(pythonCmd, [
       "-I",
@@ -447,8 +537,6 @@ try {
     ]);
     assert.equal(JSON.parse(readFileSync(tomliOut, "utf8")).projects[0].name, "nested-svc");
 
-    // Verify non-zero exit on missing directory so host logs host.commandFailed,
-    // and assert stderr contains only controlled diagnostic code without leaking paths.
     const secretMissingPath = join(scratch, "secret-path-token-do-not-log");
     const missing = spawnSync(pythonCmd, ["-I", "-B", buildModelScript, secretMissingPath, tomliOut], {
       encoding: "utf8",
@@ -459,11 +547,1005 @@ try {
     assert.ok(!missing.stderr.includes("secret-path-token-do-not-log"), "stderr must never echo raw paths");
   });
 
+  await check("backend.py negotiates litheLogging + litheFunctions, resolves Unix/Windows pyrefly launch, and injects external tools.python.executable into pyrefly LSP", async () => {
+    const stateDir = join(scratch, "backend-state");
+    const wsStateDir = join(scratch, "backend-ws-state");
+    const logDir = join(scratch, "backend-log");
+    const tempDir = join(scratch, "backend-temp");
+    for (const d of [stateDir, wsStateDir, logDir, tempDir]) mkdirSync(d, { recursive: true });
+
+    // Create an EXTERNAL virtual environment outside the workspace with a unique package `external_env_pkg`.
+    const extVenvRoot = join(scratch, "external-conda-like-env");
+    run(pythonCmd, ["-m", "venv", extVenvRoot]);
+    const extPython =
+      process.platform === "win32"
+        ? join(extVenvRoot, "Scripts", "python.exe")
+        : join(extVenvRoot, "bin", "python3");
+    const extSite = run(extPython, ["-I", "-B", "-c", "import site; print(site.getsitepackages()[0])"]).trim();
+    mkdirSync(join(extSite, "external_env_pkg"), { recursive: true });
+    writeFileSync(join(extSite, "external_env_pkg", "__init__.py"), "def magic_number() -> int:\n    return 7\n");
+
+    const child = spawn(pythonCmd, ["-I", "-B", backendScript, "--state", stateDir], {
+      cwd: scratch,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const peer = new FramedStdioPeer(child);
+    let resolvedUnixAnswer = null;
+
+    try {
+      // 1. Initialize without litheLogging MUST be refused (-32600) while keeping session alive for valid retry.
+      peer.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { capabilities: { experimental: { litheFunctions: { versions: [0] } } } },
+      });
+      const refusedInit = await peer.waitFor((m) => m.id === 1, "initialize refusal without litheLogging");
+      assert.equal(refusedInit.error?.code, -32600);
+
+      // 2. Initialize with litheLogging 0, litheFunctions 0, and litheToolchains 0.
+      peer.send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "initialize",
+        params: {
+          capabilities: {
+            experimental: {
+              litheLogging: { versions: [0] },
+              litheFunctions: { versions: [0] },
+              litheToolchains: { versions: [0], providers: ["python"] },
+            },
+          },
+        },
+      });
+      const initOk = await peer.waitFor((m) => m.id === 2 && "result" in m, "backend initialize response");
+      assert.deepEqual(initOk.result.capabilities.experimental.litheLogging, { version: 0 });
+      assert.deepEqual(initOk.result.capabilities.experimental.litheFunctions, {
+        version: 0,
+        functions: [{ id: "pyrefly.resolveLaunch" }, { id: "python.inspectEnvironment" }],
+      });
+      assert.deepEqual(initOk.result.capabilities.experimental.litheToolchains, {
+        version: 0,
+        providers: ["python"],
+      });
+
+      // 3. Resolve launch with external tools.python.executable on Unix.
+      peer.send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "lithe/function/invoke",
+        params: {
+          operationID: "op-launch-unix",
+          functionID: "pyrefly.resolveLaunch",
+          context: { contextID: "ctx-1", generation: 1 },
+          params: {
+            serverID: "python",
+            platform: { os: process.platform === "win32" ? "windows" : "macos", arch: process.arch },
+            stateDirectory: stateDir,
+            workspaceStateDirectory: wsStateDir,
+            logDirectory: logDir,
+            temporaryDirectory: tempDir,
+            settings: {
+              typeCheckingMode: "strict",
+              displayTypeErrors: "force-on",
+              diagnosticMode: "openFilesOnly",
+              autoImportCompletions: true,
+              completeFunctionParens: true,
+              importFormat: "relative",
+            },
+            tools: {
+              python: {
+                executable: extPython,
+                home: extVenvRoot,
+                version: "3.12.0",
+              },
+            },
+          },
+        },
+      });
+      const launchResp = await peer.waitFor((m) => m.id === 3, "pyrefly.resolveLaunch response");
+      resolvedUnixAnswer = launchResp.result;
+      assert.deepEqual(resolvedUnixAnswer.executable, {
+        kind: "packaged",
+        path: process.platform === "win32" ? "bin/pyrefly.exe" : "bin/pyrefly",
+      });
+      assert.deepEqual(resolvedUnixAnswer.arguments, ["lsp"]);
+      assert.equal(resolvedUnixAnswer.workspaceConfiguration.python.pythonPath, extPython);
+      assert.equal(resolvedUnixAnswer.workspaceConfiguration.python.pyrefly.typeCheckingMode, "strict");
+      assert.equal(resolvedUnixAnswer.workspaceConfiguration.python.analysis.completeFunctionParens, true);
+
+      // Verify lithe/log operationFinished arrived strictly BEFORE response id=3!
+      const idxLog3 = peer.allReceived.findIndex(
+        (m) => m.method === "lithe/log" && m.params?.operationId === "op-launch-unix" && m.params?.kind === "operationFinished",
+      );
+      const idxResp3 = peer.allReceived.findIndex((m) => m.id === 3);
+      assert.ok(idxLog3 >= 0 && idxLog3 < idxResp3, "lithe/log operationFinished must precede RPC response");
+
+      // 4. Resolve launch on Windows platform without tools.python (graceful fallback without pythonPath).
+      peer.send({
+        jsonrpc: "2.0",
+        id: 4,
+        method: "lithe/function/invoke",
+        params: {
+          operationID: "op-launch-win-fallback",
+          functionID: "pyrefly.resolveLaunch",
+          context: { contextID: "ctx-2", generation: 1 },
+          params: {
+            serverID: "python",
+            platform: { os: "windows", arch: "x86_64" },
+            stateDirectory: stateDir,
+            workspaceStateDirectory: wsStateDir,
+            logDirectory: logDir,
+            temporaryDirectory: tempDir,
+            settings: {},
+          },
+        },
+      });
+      const winFallback = await peer.waitFor((m) => m.id === 4, "Windows fallback resolveLaunch");
+      assert.deepEqual(winFallback.result.executable, { kind: "packaged", path: "bin/pyrefly.exe" });
+      assert.equal("pythonPath" in winFallback.result.workspaceConfiguration.python, false);
+
+      // 5. Malformed tools.python.executable emits degraded WARN and falls back; subsequent valid call emits recovered WARN.
+      peer.send({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "lithe/function/invoke",
+        params: {
+          operationID: "op-launch-degraded",
+          functionID: "pyrefly.resolveLaunch",
+          context: { contextID: "ctx-deg", generation: 1 },
+          params: {
+            serverID: "python",
+            platform: { os: "macos", arch: "aarch64" },
+            stateDirectory: stateDir,
+            workspaceStateDirectory: wsStateDir,
+            logDirectory: logDir,
+            temporaryDirectory: tempDir,
+            settings: {},
+            tools: { python: { executable: "  bad\npath  " } },
+          },
+        },
+      });
+      const degResp = await peer.waitFor((m) => m.id === 5, "degraded resolveLaunch");
+      assert.equal("pythonPath" in degResp.result.workspaceConfiguration.python, false);
+      assert.ok(
+        peer.allReceived.some(
+          (m) =>
+            m.method === "lithe/log" &&
+            m.params?.operationId === "op-launch-degraded" &&
+            m.params?.kind === "degraded" &&
+            m.params?.code === "invalid_tool_hint",
+        ),
+        "Expected degraded diagnostic for malformed tool hint",
+      );
+
+      peer.send({
+        jsonrpc: "2.0",
+        id: 6,
+        method: "lithe/function/invoke",
+        params: {
+          operationID: "op-launch-recovered",
+          functionID: "pyrefly.resolveLaunch",
+          context: { contextID: "ctx-deg", generation: 2 },
+          params: {
+            serverID: "python",
+            platform: { os: "macos", arch: "aarch64" },
+            stateDirectory: stateDir,
+            workspaceStateDirectory: wsStateDir,
+            logDirectory: logDir,
+            temporaryDirectory: tempDir,
+            settings: {},
+            tools: { python: { executable: extPython } },
+          },
+        },
+      });
+      await peer.waitFor((m) => m.id === 6, "recovered resolveLaunch");
+      assert.ok(
+        peer.allReceived.some(
+          (m) =>
+            m.method === "lithe/log" &&
+            m.params?.operationId === "op-launch-recovered" &&
+            m.params?.kind === "recovered" &&
+            m.params?.code === "tool_hint_restored",
+        ),
+        "Expected recovered diagnostic after valid tool hint",
+      );
+
+      // 6. High-frequency python.inspectEnvironment suppresses INFO on success but still logs ERROR on failure.
+      peer.send({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "lithe/function/invoke",
+        params: {
+          operationID: "op-inspect-quiet",
+          functionID: "python.inspectEnvironment",
+          params: { executable: extPython },
+        },
+      });
+      const inspectOk = await peer.waitFor((m) => m.id === 7, "inspectEnvironment success");
+      assert.equal(inspectOk.result.isVirtualEnv, true);
+      assert.equal(
+        peer.allReceived.some((m) => m.method === "lithe/log" && m.params?.operationId === "op-inspect-quiet"),
+        false,
+        "suppressSuccessDiagnostics must suppress operationFinished INFO",
+      );
+
+      peer.send({
+        jsonrpc: "2.0",
+        id: 8,
+        method: "lithe/function/invoke",
+        params: {
+          operationID: "op-inspect-fail",
+          functionID: "python.inspectEnvironment",
+          params: { executable: "relative/secret-path-token/python" },
+        },
+      });
+      const inspectErr = await peer.waitFor((m) => m.id === 8, "inspectEnvironment failure");
+      assert.equal(inspectErr.error?.code, -32000);
+      assert.equal(inspectErr.error?.data?.code, "python.invalidExecutable");
+      assert.ok(!inspectErr.error.message.includes("secret-path-token"));
+      assert.ok(
+        peer.allReceived.some(
+          (m) =>
+            m.method === "lithe/log" &&
+            m.params?.operationId === "op-inspect-fail" &&
+            m.params?.kind === "operationFailed" &&
+            m.params?.code === "python.invalidExecutable",
+        ),
+        "Suppressed functions MUST still emit operationFailed ERROR",
+      );
+
+      // 6b. Unknown method and unknown functionID return static messages without echoing raw input.
+      peer.send({
+        jsonrpc: "2.0",
+        id: 81,
+        method: "secret/path/unknown-method",
+        params: {},
+      });
+      const unknownMethodErr = await peer.waitFor((m) => m.id === 81, "unknown method error");
+      assert.equal(unknownMethodErr.error?.code, -32601);
+      assert.equal(unknownMethodErr.error?.message, "The requested method is not supported.");
+      assert.ok(!unknownMethodErr.error.message.includes("secret"));
+
+      peer.send({
+        jsonrpc: "2.0",
+        id: 82,
+        method: "lithe/function/invoke",
+        params: {
+          operationID: "op-unknown-fn",
+          functionID: "secret.unregistered.fn",
+          params: {},
+        },
+      });
+      const unknownFnErr = await peer.waitFor((m) => m.id === 82, "unknown function error");
+      assert.equal(unknownFnErr.error?.code, -32602);
+      assert.equal(unknownFnErr.error?.message, "The requested plugin function is not registered.");
+      assert.ok(!unknownFnErr.error.message.includes("secret"));
+
+      // 7. Clean shutdown + exit without creating any custom log files.
+      peer.send({ jsonrpc: "2.0", id: 9, method: "shutdown", params: null });
+      await peer.waitFor((m) => m.id === 9 && m.result === null, "backend shutdown");
+      peer.send({ jsonrpc: "2.0", method: "exit", params: null });
+      const exitCode = await peer.waitExit();
+      assert.equal(exitCode, 0);
+      assert.deepEqual(readdirSync(logDir), [], "backend.py must create zero custom log files");
+    } finally {
+      await peer.closeAndKill();
+    }
+
+    // 8. Verify live packaged pyrefly LSP uses the backend-injected python.pythonPath to resolve external_env_pkg
+    // in a bare workspace that has NO .venv!
+    const bareWs = join(scratch, "ws-external-env-lsp");
+    mkdirSync(bareWs, { recursive: true });
+    const srcFile = join(bareWs, "use_ext.py");
+    const srcContent = "from external_env_pkg import magic_number\nbad: str = magic_number()\n";
+    writeFileSync(srcFile, srcContent);
+
+    const pyreflyBin = join(unpackedPluginDir, ...resolvedUnixAnswer.executable.path.split("/"));
+    const versionOut = run(pyreflyBin, ["--version"], { cwd: bareWs }).trim();
+    assert.match(versionOut, /pyrefly\s+1\.4\.1/i);
+
+    const lspChild = spawn(pyreflyBin, resolvedUnixAnswer.arguments, {
+      cwd: bareWs,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const lspPeer = new FramedStdioPeer(lspChild);
+    try {
+      const rootUri = fileUri(bareWs);
+      const docUri = fileUri(srcFile);
+      lspPeer.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          processId: process.pid,
+          rootUri,
+          workspaceFolders: [{ uri: rootUri, name: "ext-ws" }],
+          capabilities: {
+            workspace: { configuration: true },
+            textDocument: { publishDiagnostics: {} },
+          },
+        },
+      });
+      await lspPeer.waitFor((m) => m.id === 1 && "result" in m, "pyrefly initialize");
+      lspPeer.send({ jsonrpc: "2.0", method: "initialized", params: {} });
+
+      let opened = false;
+      let diagMsg = null;
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        const msg = await lspPeer.waitFor(() => true, "pyrefly LSP message", 15_000);
+        if (msg.method === "workspace/configuration" && msg.id !== undefined) {
+          const items = msg.params?.items ?? [];
+          lspPeer.send({
+            jsonrpc: "2.0",
+            id: msg.id,
+            result: items.map((it) =>
+              it.section === "python" ? resolvedUnixAnswer.workspaceConfiguration.python : {},
+            ),
+          });
+          if (!opened) {
+            opened = true;
+            lspPeer.send({
+              jsonrpc: "2.0",
+              method: "textDocument/didOpen",
+              params: {
+                textDocument: { uri: docUri, languageId: "python", version: 1, text: srcContent },
+              },
+            });
+          }
+        } else if (msg.id !== undefined && msg.method) {
+          lspPeer.send({ jsonrpc: "2.0", id: msg.id, result: null });
+        } else if (msg.method === "textDocument/publishDiagnostics" && msg.params?.uri === docUri) {
+          if ((msg.params.diagnostics ?? []).length > 0) {
+            diagMsg = msg;
+            break;
+          }
+        }
+      }
+      assert.ok(diagMsg, "Expected diagnostics from pyrefly with injected pythonPath");
+      const codes = diagMsg.params.diagnostics.map((d) => d.code);
+      assert.ok(
+        !codes.includes("missing-import"),
+        `Expected backend-injected pythonPath to resolve external_env_pkg, got: ${JSON.stringify(diagMsg.params.diagnostics)}`,
+      );
+      lspPeer.send({ jsonrpc: "2.0", id: 2, method: "shutdown", params: null });
+      await lspPeer.waitFor((m) => m.id === 2, "pyrefly shutdown", 10_000);
+      lspPeer.send({ jsonrpc: "2.0", method: "exit", params: null });
+    } finally {
+      await lspPeer.closeAndKill();
+    }
+  });
+
+  await check("toolchain_provider.py answers toolchains/query for conda, uv, pyenv, Poetry, Pipenv, .python-version, and pyproject.toml", async () => {
+    const fakeHome = join(scratch, "fake-home");
+    const condaEnvDir = join(scratch, "conda-envs", "ml-311");
+    const uvPyDir = join(scratch, "uv-pythons", "cpython-3.12.6-macos-aarch64-none");
+    const pyenvVerDir = join(scratch, "pyenv-root", "versions", "3.10.14");
+    const workonRoot = join(scratch, "workon-envs");
+    const wsRoot = join(scratch, "tc-workspace");
+    mkdirSync(wsRoot, { recursive: true });
+    // Workspace-local .venv MUST be excluded from provider installations per toolchains contract!
+    const wsLocalVenv = join(wsRoot, ".venv");
+
+    const makeFakePythonHome = (dir, ver, isConda = false) => {
+      const binDir = process.platform === "win32" ? (isConda ? dir : join(dir, "Scripts")) : join(dir, "bin");
+      mkdirSync(binDir, { recursive: true });
+      const exeName = process.platform === "win32" ? "python.exe" : "python3";
+      const exePath = join(binDir, exeName);
+      writeFileSync(exePath, process.platform === "win32" ? "MZ" : "#!/bin/sh\necho Python " + ver + "\n");
+      if (process.platform !== "win32") chmodSync(exePath, 0o755);
+      if (isConda) {
+        mkdirSync(join(dir, "conda-meta"), { recursive: true });
+        writeFileSync(
+          join(dir, "conda-meta", `python-${ver}-0.json`),
+          JSON.stringify({ name: "python", version: ver }),
+        );
+      } else {
+        writeFileSync(join(dir, "pyvenv.cfg"), `version_info = ${ver}\n`);
+      }
+    };
+
+    makeFakePythonHome(condaEnvDir, "3.11.9", true);
+    makeFakePythonHome(uvPyDir, "3.12.6", false);
+    makeFakePythonHome(pyenvVerDir, "3.10.14", false);
+    makeFakePythonHome(wsLocalVenv, "3.12.1", false);
+
+    mkdirSync(join(fakeHome, ".conda"), { recursive: true });
+    const condaRegistry = join(fakeHome, ".conda", "environments.txt");
+    writeFileSync(condaRegistry, `# comment\n${condaEnvDir}\n`);
+    writeFileSync(join(wsRoot, ".python-version"), "3.11\n");
+    writeFileSync(
+      join(wsRoot, "pyproject.toml"),
+      '[project]\nname = "tc-demo"\nrequires-python = ">=3.12"\n',
+    );
+    writeFileSync(join(wsRoot, "Pipfile"), '[[source]]\nname = "pypi"\n');
+
+    // Compute pipenv prefix via python helper to create matching WORKON_HOME env.
+    const pipenvName = run(pythonCmd, [
+      "-I",
+      "-B",
+      "-c",
+      `import sys; sys.path.insert(0, ${JSON.stringify(join(unpackedPluginDir, "scripts"))}); from pathlib import Path; from toolchain_provider import _pipenv_virtualenv_prefix; print(_pipenv_virtualenv_prefix(Path(sys.argv[1]).resolve()))`,
+      wsRoot,
+    ]).trim();
+    const pipenvDir = join(workonRoot, pipenvName);
+    makeFakePythonHome(pipenvDir, "3.12.3", false);
+
+    const discoveryEnv = {
+      HOME: fakeHome,
+      USERPROFILE: fakeHome,
+      UV_PYTHON_INSTALL_DIR: dirname(uvPyDir),
+      PYENV_ROOT: join(scratch, "pyenv-root"),
+      WORKON_HOME: workonRoot,
+      CONDA_ENVS_PATH: "",
+      CONDA_PREFIX: "",
+    };
+    // Windows environment variable names are case-insensitive. Ensure inherited
+    // entries with different capitalization cannot shadow the fixture values.
+    const inherited = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !(key.toUpperCase() in discoveryEnv)),
+    );
+    const child = spawn(pythonCmd, ["-I", "-B", backendScript, "--state", join(scratch, "tc-state")], {
+      cwd: scratch,
+      env: { ...inherited, ...discoveryEnv },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const peer = new FramedStdioPeer(child);
+    try {
+      peer.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          capabilities: {
+            experimental: {
+              litheLogging: { versions: [0] },
+              litheToolchains: { versions: [0], providers: ["python"] },
+            },
+          },
+        },
+      });
+      await peer.waitFor((m) => m.id === 1 && "result" in m, "toolchain backend init");
+
+      peer.send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "toolchains/query",
+        params: {
+          operationID: "tc-op-1",
+          generation: 3,
+          providerID: "python",
+          authority: { kind: "local" },
+          tools: ["python"],
+          workspace: { rootID: "root-1", root: wsRoot, directory: "." },
+          context: { contextID: "ctx-tc", generation: 1 },
+        },
+      });
+      const reply = await peer.waitFor((m) => m.id === 2, "toolchains/query reply");
+      assert.equal(reply.result.operationID, "tc-op-1");
+      assert.equal(reply.result.generation, 3);
+      assert.equal(reply.result.providerID, "python");
+
+      // Python and Node may preserve different drive letter and directory
+      // casing for a real path on Windows. Compare native path identities.
+      const pathKey = (path) => {
+        const nativePath = normalize(path);
+        return process.platform === "win32" ? nativePath.toLowerCase() : nativePath;
+      };
+      const expectedPath = (path) => pathKey(realpathSync.native(path));
+      assert.ok(
+        reply.result.watch.map(pathKey).includes(expectedPath(condaRegistry)),
+        "Expected toolchain discovery to read the fixture home",
+      );
+      const homes = reply.result.installations.map((installation) => pathKey(installation.home));
+      assert.ok(homes.includes(expectedPath(condaEnvDir)), "Expected ~/.conda/environments.txt installation");
+      assert.ok(homes.includes(expectedPath(uvPyDir)), "Expected UV_PYTHON_INSTALL_DIR installation");
+      assert.ok(homes.includes(expectedPath(pyenvVerDir)), "Expected PYENV_ROOT installation");
+      assert.ok(homes.includes(expectedPath(pipenvDir)), "Expected WORKON_HOME Pipenv installation");
+      assert.equal(homes.includes(expectedPath(wsLocalVenv)), false, "Must NEVER return workspace-local .venv");
+
+      const bySource = new Map(reply.result.statements.map((statement) => [pathKey(statement.source), statement]));
+      const pyVerStmt = bySource.get(expectedPath(join(wsRoot, ".python-version")));
+      assert.ok(pyVerStmt);
+      assert.equal(pathKey(pyVerStmt.installation), expectedPath(condaEnvDir));
+      const pyprojStmt = bySource.get(expectedPath(join(wsRoot, "pyproject.toml")));
+      assert.ok(pyprojStmt);
+      assert.equal(pathKey(pyprojStmt.installation), expectedPath(uvPyDir));
+      const pipfileStmt = bySource.get(expectedPath(join(wsRoot, "Pipfile")));
+      assert.ok(pipfileStmt);
+      assert.equal(pipfileStmt.kind, "environment");
+      assert.equal(pathKey(pipfileStmt.installation), expectedPath(pipenvDir));
+
+      // Remote authority must return -32071 plugin.toolchain.authorityUnsupported.
+      peer.send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "toolchains/query",
+        params: {
+          operationID: "tc-op-remote",
+          generation: 4,
+          providerID: "python",
+          authority: { kind: "remote", hostID: "ssh-box" },
+          tools: ["python"],
+          workspace: null,
+          context: null,
+        },
+      });
+      const remoteErr = await peer.waitFor((m) => m.id === 3, "remote authority error");
+      assert.equal(remoteErr.error?.code, -32071);
+      assert.equal(remoteErr.error?.data?.code, "plugin.toolchain.authorityUnsupported");
+
+      peer.send({ jsonrpc: "2.0", id: 4, method: "shutdown", params: null });
+      await peer.waitFor((m) => m.id === 4, "shutdown");
+      peer.send({ jsonrpc: "2.0", method: "exit", params: null });
+      await peer.waitExit();
+    } finally {
+      await peer.closeAndKill();
+    }
+  });
+
+  await check("build_provider.py executes model (with degraded/recovered), pytest --collect-only discovery, pytest JUnit XML test runs, runEntrypoints, and cancellation cleanup", async () => {
+    const pytestExecutable = resolvePytestRuntime();
+    const noPytestExec = ensureNoPytestPython(scratch);
+
+    const wsDir = join(scratch, "pytest-workspace");
+    const cacheDir = join(scratch, "pytest-ws-state");
+    mkdirSync(join(wsDir, "tests"), { recursive: true });
+    mkdirSync(cacheDir, { recursive: true });
+
+    // Start with an intentionally malformed pyproject.toml to verify degraded -> recovered!
+    writeFileSync(join(wsDir, "pyproject.toml"), "[project\nname = 'broken'\n");
+    writeFileSync(join(wsDir, "worker.py"), 'if __name__ == "__main__":\n    print("run worker")\n');
+    writeFileSync(
+      join(wsDir, "tests", "test_calc.py"),
+      [
+        "import pytest",
+        "",
+        "@pytest.mark.parametrize('x,expected', [(2, 6), (3, 9)])",
+        "def test_scale(x, expected):",
+        "    assert x * 3 == expected",
+        "",
+        "class TestCalc:",
+        "    def test_add(self):",
+        "        assert 1 + 2 == 3",
+      ].join("\n") + "\n",
+    );
+
+    const child = spawn(pythonCmd, ["-I", "-B", buildProviderScript, "--cache", cacheDir], {
+      cwd: wsDir,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const peer = new FramedStdioPeer(child);
+
+    try {
+      const rootUri = fileUri(wsDir);
+      peer.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          rootUri,
+          workspaceFolders: [{ uri: rootUri, name: "pytest-ws" }],
+          capabilities: {
+            experimental: {
+              litheLogging: { versions: [0] },
+              litheBuild: { versions: [1, 0] },
+            },
+          },
+        },
+      });
+      const initResp = await peer.waitFor((m) => m.id === 1 && "result" in m, "build provider initialize");
+      assert.deepEqual(initResp.result.capabilities.experimental.litheBuild, { version: 1 });
+
+      // 1. Degraded lithe/build/model on malformed pyproject.toml.
+      peer.send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "lithe/build/model",
+        params: {
+          operationID: "op-model-broken",
+          buildSystemID: "python",
+          root: ".",
+          options: {},
+          optionArguments: [],
+          environment: {},
+        },
+      });
+      const brokenModel = await peer.waitFor((m) => m.id === 2, "broken pyproject model");
+      assert.equal(brokenModel.result.format, "litheBuildModel");
+      assert.ok(
+        peer.allReceived.some(
+          (m) =>
+            m.method === "lithe/log" &&
+            m.params?.operationId === "op-model-broken" &&
+            m.params?.kind === "degraded" &&
+            m.params?.code === "pyproject_parse_failed",
+        ),
+        "Expected degraded pyproject_parse_failed log",
+      );
+
+      // Fix pyproject.toml and keep UTF-8 parameter IDs to exercise the Core byte limit.
+      writeFileSync(join(wsDir, "pyproject.toml"), [
+        "[project]",
+        'name = "calc-suite"',
+        'version = "0.2.0"',
+        "[tool.pytest.ini_options]",
+        "disable_test_id_escaping_and_forfeit_all_rights_to_community_support = true",
+        "",
+      ].join("\n"));
+      peer.send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "lithe/build/model",
+        params: {
+          operationID: "op-model-fixed",
+          buildSystemID: "python",
+          root: ".",
+          refresh: true,
+          options: {},
+          optionArguments: [],
+          environment: {},
+        },
+      });
+      const fixedModel = await peer.waitFor((m) => m.id === 3, "fixed pyproject model");
+      assert.equal(fixedModel.result.projects[0].name, "calc-suite");
+      assert.ok(
+        peer.allReceived.some(
+          (m) =>
+            m.method === "lithe/log" &&
+            m.params?.operationId === "op-model-fixed" &&
+            m.params?.kind === "recovered" &&
+            m.params?.code === "pyproject_restored",
+        ),
+        "Expected recovered pyproject_restored log",
+      );
+
+      // 2. lithe/build/discoverTests via pytest --collect-only.
+      peer.send({
+        jsonrpc: "2.0",
+        id: 4,
+        method: "lithe/build/discoverTests",
+        params: {
+          operationID: "op-discover-1",
+          buildSystemID: "python",
+          root: ".",
+          tool: { executable: pytestExecutable },
+          options: {},
+          optionArguments: [],
+          environment: {},
+        },
+      });
+      const discResp = await peer.waitFor((m) => m.id === 4, "discoverTests response");
+      assert.equal(discResp.result.format, "litheTestDiscovery");
+      assert.equal(discResp.result.version, 0);
+      assert.equal(existsSync(join(wsDir, ".pytest_cache")), false, "discoverTests must write cache to workspaceStateDir, not workspace");
+
+      const discoveredCases = discResp.result.tests.map((t) => `${t.suite}::${t.case}`).sort();
+      assert.deepEqual(discoveredCases, [
+        "tests/test_calc.py::TestCalc::test_add",
+        "tests/test_calc.py::test_scale[2-6]",
+        "tests/test_calc.py::test_scale[3-9]",
+      ]);
+      for (const item of discResp.result.tests) {
+        assert.deepEqual(item.project, { name: "calc-suite", path: "." });
+      }
+
+      // 3. Missing pytest returns controlled PluginError python.pytestUnavailable + operationFailed ERROR.
+      peer.send({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "lithe/build/discoverTests",
+        params: {
+          operationID: "op-discover-missing",
+          buildSystemID: "python",
+          root: ".",
+          tool: { executable: noPytestExec },
+          options: {},
+          optionArguments: [],
+          environment: {},
+        },
+      });
+      const missingPytest = await peer.waitFor((m) => m.id === 5, "missing pytest error");
+      assert.equal(missingPytest.error?.code, -32000);
+      assert.equal(missingPytest.error?.data?.code, "python.pytestUnavailable");
+      assert.ok(
+        peer.allReceived.some(
+          (m) =>
+            m.method === "lithe/log" &&
+            m.params?.operationId === "op-discover-missing" &&
+            m.params?.kind === "operationFailed" &&
+            m.params?.code === "python.pytestUnavailable",
+        ),
+      );
+
+      // 4. Execute a single discovered parameterized test via lithe/build/test and verify progress + JUnit XML.
+      peer.send({
+        jsonrpc: "2.0",
+        id: 6,
+        method: "lithe/build/test",
+        params: {
+          operationID: "op-test-single",
+          buildSystemID: "python",
+          root: ".",
+          tool: { executable: pytestExecutable },
+          project: { name: "calc-suite", path: "." },
+          suite: "tests/test_calc.py",
+          case: "test_scale[2-6]",
+          options: {},
+          optionArguments: [],
+          userArguments: [],
+          environment: {},
+        },
+      });
+      const testRunResp = await peer.waitFor((m) => m.id === 6, "lithe/build/test response");
+      assert.equal(testRunResp.result.exitCode, 0);
+      assert.ok(
+        peer.allReceived.some(
+          (m) => m.method === "lithe/build/progress" && m.params?.operationID === "op-test-single",
+        ),
+        "Expected lithe/build/progress notifications during test execution",
+      );
+      const junitXmlPath = join(wsDir, ".pytest_cache", "lithe-junit.xml");
+      assert.ok(existsSync(junitXmlPath), "Expected JUnit XML report at .pytest_cache/lithe-junit.xml");
+      const junitXml = readFileSync(junitXmlPath, "utf8");
+      assert.match(junitXml, /tests="1"/);
+      assert.match(junitXml, /test_scale\[2-6\]/);
+
+      writeFileSync(join(wsDir, "tests", "test_names.py"), [
+        "import pytest",
+        "def test_add():",
+        "    assert True",
+        "def test_additional():",
+        "    assert True",
+        "@pytest.mark.parametrize('value', [pytest.param(1, id='é' * 600)])",
+        "def test_long_id(value):",
+        "    assert value == 1",
+        "",
+      ].join("\n"));
+      writeFileSync(join(wsDir, "test_notes.txt"), ">>> 1 + 1\n2\n");
+      peer.send({
+        jsonrpc: "2.0", id: 67, method: "lithe/build/test",
+        params: {
+          operationID: "op-case-only",
+          buildSystemID: "python", root: ".", tool: { executable: pytestExecutable },
+          case: "test_add", options: {}, optionArguments: [], userArguments: [], environment: {},
+        },
+      });
+      const caseOnly = await peer.waitFor((m) => m.id === 67, "case without a suite");
+      assert.equal(caseOnly.error?.data?.code, "python.invalidTestSelector");
+      assert.equal(readFileSync(junitXmlPath, "utf8"), junitXml);
+
+      peer.send({
+        jsonrpc: "2.0", id: 69, method: "lithe/build/discoverTests",
+        params: {
+          operationID: "op-discover-long-id",
+          buildSystemID: "python", root: ".", tool: { executable: pytestExecutable },
+          options: {}, optionArguments: [], environment: {},
+        },
+      });
+      const withLongId = await peer.waitFor((m) => m.id === 69, "discover with oversized UTF-8 test ID");
+      assert.deepEqual(
+        withLongId.result.tests.filter(({ suite }) => suite === "tests/test_names.py").map(({ case: name }) => name).sort(),
+        ["test_add", "test_additional"],
+      );
+      assert.ok(peer.allReceived.some((m) => m.method === "lithe/log"
+        && m.params?.operationId === "op-discover-long-id" && m.params?.code === "test_discovery_truncated"));
+      const doctest = withLongId.result.tests.find(({ suite }) => suite === "test_notes.txt");
+      assert.ok(doctest, "pytest must discover a root-level doctest");
+      peer.send({
+        jsonrpc: "2.0", id: 70, method: "lithe/build/test",
+        params: {
+          operationID: "op-exact-doctest",
+          buildSystemID: "python", root: ".", tool: { executable: pytestExecutable },
+          options: {}, optionArguments: [], userArguments: [], environment: {}, ...doctest,
+        },
+      });
+      const doctestRun = await peer.waitFor((m) => m.id === 70, "run discovered root-level doctest");
+      assert.equal(doctestRun.result?.exitCode, 0);
+      assert.match(readFileSync(junitXmlPath, "utf8"), /tests="1"/);
+
+      // 4b. Security & contract selector regressions: traversal, symlink escape, flag injection, and stale/deleted suites
+      // MUST reject with controlled PluginError (never bypassing _safe_within or widening to -k), while valid dot-directories work!
+      const outsideDir = join(scratch, "outside-evil-tests");
+      const outsideCanary = join(scratch, "OUTSIDE_CANARY_MUST_NOT_EXIST");
+      mkdirSync(outsideDir, { recursive: true });
+      const outsidePy = join(outsideDir, "test_evil.py");
+      writeFileSync(
+        outsidePy,
+        `open(${JSON.stringify(outsideCanary)}, "w").write("pwned")\ndef test_evil():\n    assert True\n`,
+      );
+      if (process.platform !== "win32") {
+        const { symlinkSync } = await import("node:fs");
+        symlinkSync(outsidePy, join(wsDir, "tests", "test_escape_link.py"));
+      }
+
+      for (const [reqId, opId, badParams, expectedCode] of [
+        [61, "op-sel-traversal", { suite: "tests/../../outside-evil-tests/test_evil.py", case: "test_evil" }, "python.invalidTestSelector"],
+        [62, "op-sel-flag", { suite: "tests/test_calc.py", case: "--collect-only" }, "python.invalidTestSelector"],
+        [63, "op-sel-stale-path", { suite: "tests/test_deleted.py", case: "test_add" }, "python.staleTestSelector"],
+        [64, "op-sel-stale-dotted", { suite: "tests.test_deleted.TestCalc", case: "test_add" }, "python.staleTestSelector"],
+        [67, "op-sel-stale-case", { suite: "tests/test_calc.py", case: "TestCalc::test_removed" }, "python.staleTestSelector"],
+        [68, "op-sel-stale-project", { project: { name: "removed-project", path: "removed-project" } }, "python.staleTestSelector"],
+        [69, "op-sel-stale-target", { target: { properties: { directory: "removed-tests" } } }, "python.staleTestSelector"],
+      ]) {
+        peer.send({
+          jsonrpc: "2.0",
+          id: reqId,
+          method: "lithe/build/test",
+          params: {
+            operationID: opId,
+            buildSystemID: "python",
+            root: ".",
+            tool: { executable: pytestExecutable },
+            project: { name: "calc-suite", path: "." },
+            ...badParams,
+            options: {},
+            optionArguments: [],
+            userArguments: [],
+            environment: {},
+          },
+        });
+        const rej = await peer.waitFor((m) => m.id === reqId, `rejected selector ${opId}`);
+        assert.equal(rej.error?.code, -32000);
+        assert.equal(rej.error?.data?.code, expectedCode);
+        assert.ok(
+          peer.allReceived.some(
+            (m) => m.method === "lithe/log" && m.params?.operationId === opId && m.params?.kind === "operationFailed" && m.params?.code === expectedCode,
+          ),
+        );
+      }
+
+      if (process.platform !== "win32") {
+        peer.send({
+          jsonrpc: "2.0",
+          id: 65,
+          method: "lithe/build/test",
+          params: {
+            operationID: "op-sel-symlink",
+            buildSystemID: "python",
+            root: ".",
+            tool: { executable: pytestExecutable },
+            project: { name: "calc-suite", path: "." },
+            suite: "tests/test_escape_link.py",
+            case: "test_evil",
+            options: {},
+            optionArguments: [],
+            userArguments: [],
+            environment: {},
+          },
+        });
+        const symRej = await peer.waitFor((m) => m.id === 65, "rejected symlink escape selector");
+        assert.equal(symRej.error?.code, -32000);
+        assert.equal(symRej.error?.data?.code, "python.invalidTestSelector");
+        rmSync(join(wsDir, "tests", "test_escape_link.py"), { force: true });
+      }
+      assert.equal(existsSync(outsideCanary), false, "Outside test file must NEVER be executed");
+
+      // Valid dot-prefixed subdirectory (e.g. `.bench/test_dotdir.py`) must NOT be mangled by lstrip("./")!
+      mkdirSync(join(wsDir, ".bench"), { recursive: true });
+      writeFileSync(join(wsDir, ".bench", "test_dotdir.py"), "def test_dot_ok():\n    assert 2 * 2 == 4\n");
+      peer.send({
+        jsonrpc: "2.0",
+        id: 66,
+        method: "lithe/build/test",
+        params: {
+          operationID: "op-test-dotdir",
+          buildSystemID: "python",
+          root: ".",
+          tool: { executable: pytestExecutable },
+          project: { name: "calc-suite", path: "." },
+          suite: ".bench/test_dotdir.py",
+          case: "test_dot_ok",
+          options: {},
+          optionArguments: [],
+          userArguments: [],
+          environment: {},
+        },
+      });
+      const dotDirResp = await peer.waitFor((m) => m.id === 66, "dot-directory test run");
+      assert.equal(dotDirResp.result.exitCode, 0);
+
+      // 5. lithe/build/runEntrypoints returns worker.py entrypoint and suppresses success INFO log.
+      peer.send({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "lithe/build/runEntrypoints",
+        params: {
+          operationID: "op-entrypoints",
+          buildSystemID: "python",
+          root: ".",
+          file: "worker.py",
+          options: {},
+          optionArguments: [],
+          environment: {},
+        },
+      });
+      const epResp = await peer.waitFor((m) => m.id === 7, "runEntrypoints response");
+      assert.equal(epResp.result.format, "litheRunEntrypoints");
+      assert.equal(epResp.result.entrypoints.length, 1);
+      assert.equal(epResp.result.entrypoints[0].name, "worker.py");
+      assert.equal(
+        peer.allReceived.some((m) => m.method === "lithe/log" && m.params?.operationId === "op-entrypoints"),
+        false,
+        "runEntrypoints must suppress high-frequency success INFO logs",
+      );
+
+      // 6. $/cancelRequest terminates active pytest subprocess tree cleanly with zero orphan processes!
+      const pidFile = join(scratch, "slow-collect.pid");
+      writeFileSync(
+        join(wsDir, "tests", "test_blocking.py"),
+        [
+          "import os, pathlib, time",
+          `pathlib.Path(${JSON.stringify(pidFile)}).write_text(str(os.getpid()), encoding='utf-8')`,
+          "time.sleep(30)",
+          "def test_never_reached():",
+          "    assert True",
+        ].join("\n") + "\n",
+      );
+
+      peer.send({
+        jsonrpc: "2.0",
+        id: 8,
+        method: "lithe/build/discoverTests",
+        params: {
+          operationID: "op-discover-cancel",
+          buildSystemID: "python",
+          root: ".",
+          tool: { executable: pytestExecutable },
+          options: {},
+          optionArguments: [],
+          environment: {},
+        },
+      });
+
+      const waitPidDeadline = Date.now() + 10_000;
+      while (!existsSync(pidFile) && Date.now() < waitPidDeadline) {
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      assert.ok(existsSync(pidFile), "Expected blocking pytest child process to start and record its PID");
+      const childPid = Number.parseInt(readFileSync(pidFile, "utf8").trim(), 10);
+      assert.ok(Number.isInteger(childPid) && childPid > 0);
+
+      peer.send({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id: 8 } });
+      const cancelResp = await peer.waitFor((m) => m.id === 8, "cancelled discoverTests response", 10_000);
+      assert.equal(cancelResp.error?.code, -32800);
+      assert.equal(
+        peer.allReceived.some((m) => m.method === "lithe/log" && m.params?.operationId === "op-discover-cancel"),
+        false,
+        "Cancelled requests must NOT emit operationFinished or operationFailed logs",
+      );
+
+      // Bounded check that the spawned pytest process exited completely.
+      const killCheckDeadline = Date.now() + 3_000;
+      while (isProcessAlive(childPid) && Date.now() < killCheckDeadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.equal(isProcessAlive(childPid), false, `Child pytest PID ${childPid} must be terminated on cancel`);
+
+      peer.send({ jsonrpc: "2.0", id: 9, method: "shutdown", params: null });
+      await peer.waitFor((m) => m.id === 9 && m.result === null, "build provider shutdown");
+      peer.send({ jsonrpc: "2.0", method: "exit", params: null });
+      const exitCode = await peer.waitExit();
+      assert.equal(exitCode, 0);
+    } finally {
+      await peer.closeAndKill();
+    }
+  });
+
+  await check("RPC cancellation covers queued requests and child process tree ownership", () => {
+    run(pythonCmd, ["-I", "-B", join(ROOT, "scripts", "test-rpc.py"), join(unpackedPluginDir, "scripts")]);
+  });
+
   await check("lineMatcher and outputLinkMatchers match mypy, Ruff, and Python Traceback output", () => {
     const pyBuild = pluginManifest.buildSystems.find((b) => b.id === "python");
     const mypyPattern = pyBuild.diagnostics.patterns[0];
     const mypyRe = new RegExp(mypyPattern.regex);
-    const mypyMatch = mypyRe.exec('src/app.py:42:13: error: Incompatible types in assignment [assignment]');
+    const mypyMatch = mypyRe.exec("src/app.py:42:13: error: Incompatible types in assignment [assignment]");
     assert.ok(mypyMatch);
     assert.equal(mypyMatch[mypyPattern.file], "src/app.py");
     assert.equal(mypyMatch[mypyPattern.line], "42");
@@ -481,7 +1563,6 @@ try {
     assert.equal(ruffMatch[ruffPattern.column], "8");
     assert.equal(ruffMatch[ruffPattern.message], "F401 `os` imported but unused");
 
-    // JS equivalent of Rust named capture group (?P<path>...) -> (?<path>...)
     const tbRe = new RegExp(pluginManifest.outputLinkMatchers[0].pattern.replaceAll("(?P<", "(?<"));
     const tbMatch = tbRe.exec('  File "/workspace/Lithe Python Demo/main.py", line 9, in <module>');
     assert.ok(tbMatch);
@@ -519,13 +1600,12 @@ try {
     assert.equal(runOut, "Hello from Lithe Python Demo!");
   });
 
-  await check("packaged pyrefly answers --version and resolves .venv packages over LSP without pythonPath: ''", async () => {
-    const pyreflyServer = pluginManifest.languageServers.find((s) => s.languageID === "python");
-    const pyreflyBin = join(unpackedPluginDir, ...pyreflyServer.launch.path.split("/"));
-    const versionOut = run(pyreflyBin, pyreflyServer.validationArguments, { cwd: demoDir }).trim();
-    assert.match(versionOut, /pyrefly\s+1\.4\.1/i);
+  await check("packaged pyrefly resolves .venv packages over LSP when tools.python is omitted (graceful fallback)", async () => {
+    const pyreflyBin = join(
+      unpackedPluginDir,
+      ...(process.platform === "win32" ? ["bin", "pyrefly.exe"] : ["bin", "pyrefly"]),
+    );
 
-    // Add a synthetic package inside demoDir/.venv site-packages so only .venv resolution can find it.
     const venvPython =
       process.platform === "win32"
         ? join(demoDir, ".venv", "Scripts", "python.exe")
@@ -535,16 +1615,16 @@ try {
     }).trim();
     const customPkgDir = join(sitePackages, "venv_only_pkg");
     mkdirSync(customPkgDir, { recursive: true });
-    writeFileSync(join(customPkgDir, "__init__.py"), " def answer() -> int:\n    return 42\n".trimStart());
+    writeFileSync(join(customPkgDir, "__init__.py"), "def answer() -> int:\n    return 42\n");
 
     const checkFile = join(demoDir, "check_types.py");
     const checkContent = "from venv_only_pkg import answer\nx: str = answer()\n";
     writeFileSync(checkFile, checkContent);
 
-    const fileUri = new URL(`file://${checkFile.startsWith("/") ? "" : "/"}${checkFile.replace(/\\/g, "/")}`).href;
-    const rootUri = new URL(`file://${demoDir.startsWith("/") ? "" : "/"}${demoDir.replace(/\\/g, "/")}`).href;
+    const fileUriStr = fileUri(checkFile);
+    const rootUriStr = fileUri(demoDir);
 
-    const child = spawn(pyreflyBin, pyreflyServer.arguments, {
+    const child = spawn(pyreflyBin, ["lsp"], {
       cwd: demoDir,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -557,8 +1637,8 @@ try {
         method: "initialize",
         params: {
           processId: process.pid,
-          rootUri,
-          workspaceFolders: [{ uri: rootUri, name: "demo" }],
+          rootUri: rootUriStr,
+          workspaceFolders: [{ uri: rootUriStr, name: "demo" }],
           capabilities: {
             workspace: { configuration: true },
             textDocument: { publishDiagnostics: {} },
@@ -569,7 +1649,6 @@ try {
       await peer.waitFor((m) => m.id === 1 && "result" in m, "pyrefly initialize response");
       peer.send({ jsonrpc: "2.0", method: "initialized", params: {} });
 
-      // Respond to workspace/configuration with our exact manifest defaults (no pythonPath!).
       const expandedPythonConfig = {
         pyrefly: {
           typeCheckingMode: "default",
@@ -604,7 +1683,7 @@ try {
               method: "textDocument/didOpen",
               params: {
                 textDocument: {
-                  uri: fileUri,
+                  uri: fileUriStr,
                   languageId: "python",
                   version: 1,
                   text: checkContent,
@@ -614,7 +1693,7 @@ try {
           }
         } else if (msg.id !== undefined && msg.method) {
           peer.send({ jsonrpc: "2.0", id: msg.id, result: null });
-        } else if (msg.method === "textDocument/publishDiagnostics" && msg.params?.uri === fileUri) {
+        } else if (msg.method === "textDocument/publishDiagnostics" && msg.params?.uri === fileUriStr) {
           if ((msg.params.diagnostics ?? []).length > 0) {
             diagnosticsMsg = msg;
             break;
@@ -624,7 +1703,10 @@ try {
 
       assert.ok(diagnosticsMsg, "Expected publishDiagnostics from pyrefly");
       const codes = diagnosticsMsg.params.diagnostics.map((d) => d.code);
-      assert.ok(!codes.includes("missing-import"), `Expected .venv import to resolve, got: ${JSON.stringify(diagnosticsMsg.params.diagnostics)}`);
+      assert.ok(
+        !codes.includes("missing-import"),
+        `Expected .venv import to resolve without pythonPath, got: ${JSON.stringify(diagnosticsMsg.params.diagnostics)}`,
+      );
       assert.ok(diagnosticsMsg.params.diagnostics.length >= 1, "Expected type mismatch diagnostic on x: str = answer()");
 
       peer.send({ jsonrpc: "2.0", id: 2, method: "shutdown", params: null });
@@ -737,15 +1819,6 @@ try {
     assert.deepEqual(afterSnapshot, beforeSnapshot);
   });
 } finally {
-  if (madeReadOnly && unpackedPluginDir && !process.env.LITHE_TEST_PLUGIN_DIR) {
-    try {
-      setDirectoryTreeReadOnly(unpackedPluginDir, false);
-    } catch {}
-  } else if (madeReadOnly && unpackedPluginDir && process.env.LITHE_TEST_PLUGIN_DIR) {
-    try {
-      setDirectoryTreeReadOnly(unpackedPluginDir, false);
-    } catch {}
-  }
   rmSync(scratch, { recursive: true, force: true });
 }
 

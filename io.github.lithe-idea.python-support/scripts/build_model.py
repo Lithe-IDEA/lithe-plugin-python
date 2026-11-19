@@ -8,6 +8,7 @@ import sys
 
 # Never write bytecode into the installed read-only plugin directory or the user workspace.
 sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 
 def _load_tomllib():
@@ -34,6 +35,7 @@ _IGNORED_DIRS = frozenset({
     ".svn",
     ".venv",
     "venv",
+    ".conda",
     "env",
     ".env",
     "__pycache__",
@@ -144,6 +146,7 @@ def _parse_pyproject(pyproject_path: Path):
         "version": None,
         "requires_python": None,
         "scripts": {},
+        "parse_failed": False,
     }
     if not pyproject_path.is_file():
         return meta
@@ -151,8 +154,10 @@ def _parse_pyproject(pyproject_path: Path):
     try:
         data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
     except Exception:
+        meta["parse_failed"] = True
         return meta
     if not isinstance(data, dict):
+        meta["parse_failed"] = True
         return meta
 
     project = data.get("project")
@@ -401,11 +406,14 @@ def _module_name_for_file(rel_posix: str, has_src_dir: bool):
     return ".".join(parts), app_dir
 
 
-def build_model(root_dir: Path) -> dict:
+def build_model_with_diagnostics(root_dir: Path) -> tuple[dict, list[str]]:
     root_real = root_dir.resolve()
     py_meta = _parse_pyproject(root_dir / "pyproject.toml")
     cfg_meta = _parse_setup_cfg(root_dir / "setup.cfg")
     setup_meta = _parse_setup_py(root_dir / "setup.py")
+    degraded_codes: list[str] = []
+    if py_meta.get("parse_failed"):
+        degraded_codes.append("pyproject_parse_failed")
 
     project_name = py_meta["name"] or cfg_meta["name"] or setup_meta["name"] or root_real.name or "python-project"
     project_version = py_meta["version"] or cfg_meta["version"] or setup_meta["version"]
@@ -474,7 +482,7 @@ def build_model(root_dir: Path) -> dict:
         kept_dirs = []
         for d in sorted(dirnames):
             child = current_path / d
-            if d in (".venv", "venv") and depth == 0:
+            if d in (".venv", "venv", ".conda") and depth == 0:
                 content_roots.append({"path": d, "kind": "excluded"})
                 continue
             if _should_skip_dir(d):
@@ -605,7 +613,7 @@ def build_model(root_dir: Path) -> dict:
             seen_roots.add(key)
             deduped_roots.append(root_entry)
 
-    return {
+    model = {
         "format": "litheBuildModel",
         "version": 0,
         "projects": [
@@ -619,6 +627,53 @@ def build_model(root_dir: Path) -> dict:
         "tasks": [],
         "contentRoots": deduped_roots,
     }
+    return model, degraded_codes
+
+
+def build_model(root_dir: Path) -> dict:
+    model, _ = build_model_with_diagnostics(root_dir)
+    return model
+
+
+def inspect_file_entrypoints(root_dir: Path, rel_file_posix: str, project_selection: dict) -> list[dict]:
+    """Static AST inspection of a single Python file for lithe/build/runEntrypoints."""
+    root_real = root_dir.resolve()
+    clean_rel = rel_file_posix.replace("\\", "/").lstrip("/")
+    if not clean_rel or any(part in ("", ".", "..") for part in clean_rel.split("/")):
+        return []
+    fpath = root_dir / Path(*clean_rel.split("/"))
+    if not fpath.is_file() or not _safe_within(root_real, fpath):
+        return []
+    if _is_test_file(clean_rel, fpath.name) or fpath.name == "setup.py":
+        return []
+    tree = _read_ast(fpath)
+    if tree is None:
+        return []
+    facts = _analyze_python_file(tree)
+    has_src_dir = (root_dir / "src").is_dir() and _safe_within(root_real, root_dir / "src")
+    results: list[dict] = []
+
+    if fpath.name == "__main__.py":
+        parent_rel = "/".join(clean_rel.split("/")[:-1])
+        if parent_rel:
+            mod_name, _ = _module_name_for_file(f"{parent_rel}/__init__.py", has_src_dir)
+            if mod_name:
+                results.append({
+                    "run": "main",
+                    "name": mod_name,
+                    "entrypoint": f"module:{mod_name}",
+                    "project": project_selection,
+                })
+        return results
+
+    if facts["has_main_guard"]:
+        results.append({
+            "run": "main",
+            "name": clean_rel,
+            "entrypoint": f"script:{clean_rel}",
+            "project": project_selection,
+        })
+    return results
 
 
 def main(argv: list[str]) -> int:
