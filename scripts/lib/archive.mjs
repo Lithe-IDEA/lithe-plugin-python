@@ -185,7 +185,9 @@ export function extractWheelSubtree(wheelBuffer, packagePrefix, destParentDir) {
 }
 
 /** Writes a deterministic POSIX-compatible ZIP archive of `<stageRoot>/<rootDirName>`. */
-export function writeDeterministicZip(stageRoot, rootDirName, outputZipPath) {
+export function writeDeterministicZip(stageRoot, rootDirName, outputZipPath, executablePaths) {
+  // Staging filesystem permissions cannot represent Unix execute bits on Windows.
+  const executables = new Set(executablePaths.map((path) => `${rootDirName}/${path}`));
   const collected = [];
 
   function walk(absDir, relPosix) {
@@ -201,7 +203,7 @@ export function writeDeterministicZip(stageRoot, rootDirName, outputZipPath) {
       if (stat.isDirectory()) {
         walk(absPath, rel);
       } else if (stat.isFile()) {
-        const executable = (stat.mode & 0o111) !== 0;
+        const executable = executables.has(rel);
         collected.push({
           name: rel,
           data: readFileSync(absPath),

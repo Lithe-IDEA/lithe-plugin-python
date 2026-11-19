@@ -229,7 +229,7 @@ export async function packagePlatforms({ platforms, expectTag, cleanDist = false
     const relZipPath = `dist/${ASSET_PREFIX}-${baseManifest.version}-${platform}.zip`;
     const absZipPath = resolve(ROOT, relZipPath);
     rmSync(absZipPath, { force: true });
-    writeDeterministicZip(stagePlatformRoot, PACKAGE_ID, absZipPath);
+    writeDeterministicZip(stagePlatformRoot, PACKAGE_ID, absZipPath, [pyreflySpec.packagePath, backendPath(platform)]);
 
     const sha256 = sha256File(absZipPath);
     built.push({ platform, relZipPath, absZipPath, sha256 });
