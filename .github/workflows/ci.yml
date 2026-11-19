@@ -10,6 +10,10 @@ permissions:
 
 jobs:
   package:
+    uses: ./.github/workflows/package.yml
+
+  verify-store:
+    needs: package
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -17,9 +21,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Build all 6 platform archives
-        run: node scripts/package.mjs
-      - name: Verify release archives
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: python-support-archive-*
+          merge-multiple: true
+          path: dist
+      - name: Verify six release archives
+        env:
+          LITHE_EXPECT_ALL_ARCHIVES: "1"
         run: node --test --test-timeout=60000 scripts/package/*.test.mjs
       - name: Validate against Lithe Store rules
         run: |
@@ -37,12 +46,6 @@ jobs:
             }
             process.exit(failed ? 1 : 0);
           "
-      - name: Upload built platform archives
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-support-archives
-          path: dist/python-support-*.zip
-          if-no-files-found: error
 
   commands:
     needs: package
@@ -72,7 +75,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check pytest
       - uses: actions/download-artifact@v4
         with:
-          name: python-support-archives
+          name: python-support-archive-${{ matrix.platform }}
           path: dist
       - name: Unpack Windows archive under a path with spaces
         if: runner.os == 'Windows'

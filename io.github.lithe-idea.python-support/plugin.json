@@ -2,7 +2,7 @@
   "schemaVersion": 0,
   "id": "io.github.lithe-idea.python-support",
   "displayName": "Python Support",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "vendor": {
     "id": "io.github.lithe-idea",
     "displayName": "Lithe Community",
@@ -13,14 +13,15 @@
   "requires": {
     "backend": 0,
     "buildProviders": 0,
-    "buildSystems": 0,
+    "buildSystems": 1,
     "debugAdapters": 0,
     "languageServers": 0,
     "languages": 0,
     "outputLinkMatchers": 0,
     "projectGenerators": 0,
     "settings": 0,
-    "toolDefinitions": 0
+    "toolDefinitions": 0,
+    "toolchainProviders": 0
   },
   "requiresTools": ["python"],
   "permissions": [
@@ -29,7 +30,8 @@
     "debug.launch",
     "languageServer.launch",
     "process.build",
-    "project.generate"
+    "project.generate",
+    "toolchains.provide"
   ],
   "activationEvents": [
     "onBuildSystem:conda",
@@ -41,13 +43,9 @@
   ],
   "backend": {
     "launch": {
-      "kind": "runtime",
-      "tool": "python",
-      "minimumVersion": "3.9",
-      "runtimeArguments": ["-I", "-B"],
-      "entry": "scripts/backend.py"
-    },
-    "arguments": ["--state", "${stateDir}"]
+      "kind": "packaged",
+      "path": "bin/lithe-python-backend"
+    }
   },
   "languages": [
     {
@@ -465,6 +463,19 @@
       ]
     }
   ],
+  "toolchainProviders": [
+    {
+      "id": "python",
+      "displayName": "Python Environments",
+      "tools": ["python"],
+      "watchFiles": [
+        { "pattern": ".python-version", "reader": "compatible" },
+        { "pattern": "pyproject.toml", "reader": "native" },
+        { "pattern": "Pipfile", "reader": "native" },
+        { "pattern": "poetry.lock", "reader": "native" }
+      ]
+    }
+  ],
   "buildSystems": [
     {
       "id": "python",
@@ -492,7 +503,6 @@
           "runtimeArguments": ["-I", "-B"],
           "entry": "scripts/build_provider.py"
         },
-        "arguments": ["--cache", "${workspaceStateDir}"],
         "executesProjectCode": true,
         "mayUseNetwork": false
       },
@@ -628,7 +638,18 @@
         "scopes": ["workspace", "project", "target"],
         "targetTags": ["test"],
         "filters": ["suite", "case"],
-        "discovery": true,
+        "discoveryCommand": {
+          "arguments": [
+            "-I",
+            "-B",
+            "${pluginDir}/scripts/discover_tests.py",
+            "${outputFile}",
+            "${root}",
+            "${optionArguments}"
+          ],
+          "executesProjectCode": true,
+          "mayUseNetwork": false
+        },
         "arguments": [],
         "results": {
           "decoder": "junitXml",

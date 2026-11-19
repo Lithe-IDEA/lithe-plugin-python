@@ -22,10 +22,12 @@ import (
 
 	"github.com/1lck/Lithe-IDEA/desktop/internal/buildprovider"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginbackend"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginhost"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/plugininstall"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginservice"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginsettings"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/plugintrust"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/store"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/toolchain"
@@ -75,6 +77,13 @@ func toWindowsVariantManifest(t *testing.T, unixManifest []byte) []byte {
 	var doc map[string]any
 	if err := json.Unmarshal(unixManifest, &doc); err != nil {
 		t.Fatal(err)
+	}
+	if backend, ok := doc["backend"].(map[string]any); ok {
+		if launch, ok := backend["launch"].(map[string]any); ok {
+			if path, ok := launch["path"].(string); ok && !strings.HasSuffix(path, ".exe") {
+				launch["path"] = path + ".exe"
+			}
+		}
 	}
 	generators, _ := doc["projectGenerators"].([]any)
 	for _, rawGen := range generators {
@@ -135,6 +144,33 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+
+	providerHome := t.TempDir()
+	if canonical, err := filepath.EvalSymlinks(providerHome); err == nil {
+		providerHome = canonical
+	}
+	t.Setenv("HOME", providerHome)
+	t.Setenv("USERPROFILE", providerHome)
+	// Keep the provider's fixture independent of installed manager configurations.
+	for _, name := range []string{"APPDATA", "LOCALAPPDATA", "CONDA_ENVS_PATH", "CONDA_PREFIX", "UV_PYTHON_INSTALL_DIR", "PYENV_ROOT", "POETRY_VIRTUALENVS_PATH", "POETRY_CACHE_DIR", "WORKON_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"} {
+		t.Setenv(name, "")
+	}
+	registeredHomes := []string{
+		filepath.Join(providerHome, "registered-python-one"),
+		filepath.Join(providerHome, "registered-python-replacement"),
+	}
+	for _, home := range registeredHomes {
+		if out, err := exec.CommandContext(ctx, systemPython, "-m", "venv", "--copies", "--without-pip", home).CombinedOutput(); err != nil {
+			t.Fatalf("create regular-file external environment: %v\n%s", err, out)
+		}
+	}
+	registryDir := filepath.Join(providerHome, ".conda")
+	if err := os.MkdirAll(registryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(registryDir, "environments.txt"), []byte(strings.Join(registeredHomes, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	kernel := core.NewClient()
 	appStore := store.At(t.TempDir())
@@ -235,7 +271,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("unexpected l10n rejections: %+v", settingsState.Localization.Rejected)
 	}
 
-	// 4. Plan backend-resolved language server (Pyrefly), call real backend.py pyrefly.resolveLaunch
+	// 4. Plan backend-resolved language server (Pyrefly), call the packaged Pyrefly launch resolver
 	// with and without tools.python.executable, decode via Core, and run pyrefly --version.
 	stateDir := t.TempDir()
 	wsStateDir := t.TempDir()
@@ -457,21 +493,27 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	_ = dapCmd.Process.Kill()
 	_ = dapCmd.Wait()
 
-	// 6. Detect all 4 build systems (conda, python, ruff, uv), start real build_provider.py,
-	// and verify lithe/build/model, lithe/build/discoverTests, and lithe/build/test + junitXml!
+	// 6. Detect all four build systems and exercise the Python model, discovery and test run.
 	detection, err := kernel.DetectBuildSystems(ctx, workspace, []json.RawMessage{normalizedManifest})
 	if err != nil {
 		t.Fatalf("DetectBuildSystems: %v", err)
 	}
 	var detectedIDs []string
+	var pythonInstance core.BuildInstance
 	for _, inst := range detection.Instances {
 		detectedIDs = append(detectedIDs, inst.BuildSystemID)
+		if inst.BuildSystemID == "python" {
+			pythonInstance = inst
+		}
 	}
 	slices.Sort(detectedIDs)
 	if !slices.Equal(detectedIDs, []string{"conda", "python", "ruff", "uv"}) {
 		t.Fatalf("detected build systems = %v, want [conda python ruff uv]", detectedIDs)
 	}
 
+	// Run Build and pytest as a user who explicitly trusted this fixture.
+	buildProject := &project{root: workspace}
+	buildProject.trust.codeAllowed.Store(true)
 	buildWsState := t.TempDir()
 	providerClient, err := buildprovider.Start(ctx, service.Backend, pluginbackend.StartRequest{
 		Manifest:                normalizedManifest,
@@ -505,6 +547,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		WorkspaceStateDirectory: buildWsState,
 		WorkspaceRoot:           workspace,
 		Tool:                    &pytestTool,
+		ProjectCodeAllowed:      buildProject.trust.allowed(),
 	})
 	if err != nil {
 		t.Fatalf("PlanBuildModel: %v", err)
@@ -535,32 +578,49 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("expected derived Run entries for ws-cli and main.py, got %+v", decodedModel.Run)
 	}
 
-	// 6b. Provider lithe/build/discoverTests -> DecodeBuildTestDiscovery.
-	discPlan, err := kernel.PlanBuildTestDiscovery(ctx, normalizedManifest, "python", core.BuildPlanRequest{
-		Root:          ".",
-		WorkspaceRoot: workspace,
-		Tool:          &pytestTool,
-	})
+	// 6b. Run the installed plugin's discovery through the workbench command path.
+	entries, err := service.Manager.Installed()
 	if err != nil {
-		t.Fatalf("PlanBuildTestDiscovery: %v", err)
+		t.Fatal(err)
 	}
-	if discPlan.Provider == nil || discPlan.Provider.Method != "lithe/build/discoverTests" {
-		t.Fatalf("expected provider testDiscoveryPlan, got %+v", discPlan)
+	buildPlugins, err := service.BuildPlugins(ctx, entries)
+	if err != nil || len(buildPlugins) != 1 || buildPlugins[0].PluginID != pythonSupportPluginID {
+		t.Fatalf("expected the installed Python build plugin: %+v (%v)", buildPlugins, err)
 	}
-	discOp, err := providerClient.Execute(ctx, discPlan.Provider.Method, discPlan.Provider.Params, 45_000)
+	buildPlugin := buildPlugins[0]
+	instance := buildInstance{
+		BuildInstance:    pythonInstance,
+		PluginID:         buildPlugin.PluginID,
+		Version:          buildPlugin.Version,
+		Manifest:         buildPlugin.Manifest,
+		PackageDirectory: buildPlugin.Directory,
+		System:           buildPlugin.Systems["python"],
+	}
+	if instance.System.Test == nil || !instance.System.Test.DiscoveryCommand {
+		t.Fatal("installed Python build system did not expose command discovery")
+	}
+	preferences := pluginsettings.New(kernel, appStore.Dir())
+	settings, err := preferences.Load(ctx, instance.Manifest, workspace)
 	if err != nil {
-		t.Fatalf("providerClient.Execute(lithe/build/discoverTests): %v", err)
+		t.Fatal(err)
 	}
-	discRawResult, err := discOp.Wait(ctx)
+	pythonSetting, err := json.Marshal(pytestTool.Executable)
 	if err != nil {
-		t.Fatalf("discOp.Wait: %v", err)
+		t.Fatal(err)
 	}
-	decodedDiscovery, err := kernel.DecodeBuildTestDiscovery(ctx, normalizedManifest, "python", core.BuildDecodeTestDiscoveryRequest{
-		Root:   ".",
-		Result: discRawResult,
-	})
+	if _, err := preferences.Save(ctx, settings, "global", []core.PluginSettingEdit{{ID: "pythonExecutable", Value: pythonSetting}}, nil); err != nil {
+		t.Fatalf("set the test interpreter: %v", err)
+	}
+	workbench := &App{kernel: kernel, plugins: service, store: appStore, text: i18n.For(i18n.English)}
+	discoveryOperation := core.NewOperation()
+	discoveryCtx := core.WithOrigin(ctx, core.Origin{Operation: discoveryOperation})
+	decodedDiscovery, err := workbench.buildTestDiscovery(discoveryCtx, buildProject, instance, kernel, false)
 	if err != nil {
-		t.Fatalf("DecodeBuildTestDiscovery: %v", err)
+		t.Fatalf("workbench command discovery: %v", err)
+	}
+	discoveryFiles, err := os.ReadDir(buildStateDirectory(service.Root, workspace, instance))
+	if err != nil || len(discoveryFiles) != 0 {
+		t.Fatalf("discovery left workspace state entries %v (%v)", discoveryFiles, err)
 	}
 	if len(decodedDiscovery.Tests) != 3 {
 		t.Fatalf("discovered tests = %+v, want 3 items (test_alpha, test_scale[2-6], test_scale[4-12])", decodedDiscovery.Tests)
@@ -578,13 +638,14 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 
 	// 6c. Run that exact single discovered test via PlanBuildTest -> lithe/build/test -> DecodeBuildTestResults!
 	testPlan, err := kernel.PlanBuildTest(ctx, normalizedManifest, "python", core.BuildTestRequest{
-		Root:          ".",
-		WorkspaceRoot: workspace,
-		Project:       chosenTest.Project,
-		Target:        chosenTest.Target,
-		Suite:         chosenTest.Suite,
-		Case:          chosenTest.Case,
-		Projects:      []string{"."},
+		Root:               ".",
+		WorkspaceRoot:      workspace,
+		Project:            chosenTest.Project,
+		Target:             chosenTest.Target,
+		Suite:              chosenTest.Suite,
+		Case:               chosenTest.Case,
+		Projects:           []string{"."},
+		ProjectCodeAllowed: buildProject.trust.allowed(),
 	})
 	if err != nil {
 		t.Fatalf("PlanBuildTest: %v", err)
@@ -634,8 +695,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("unexpected decoded JUnit XML results: %+v", decodedResults)
 	}
 
-	// Verify Core validated and forwarded structured lithe/log events for both backend and build provider
-	// with zero plugins.diagnostics.rejected events!
+	// Verify plugin RPC diagnostics and the workbench's command terminal event.
 	drained, err := kernel.DrainCoreEvents(ctx)
 	if err != nil {
 		t.Fatalf("DrainCoreEvents: %v", err)
@@ -643,9 +703,13 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	logMu.Lock()
 	captured := slices.Clone(recordedEvents)
 	logMu.Unlock()
+	var discoveryTerminals []string
 	for _, ev := range drained.Events {
 		op, _ := ev.Fields["operation"].(string)
 		captured = append(captured, fmt.Sprintf("%s:%s", ev.Event, op))
+		if op == "lithe/build/discoverTests" && ev.Op == discoveryOperation {
+			discoveryTerminals = append(discoveryTerminals, ev.Event)
+		}
 		if ev.Event == "plugins.diagnostics.rejected" {
 			t.Fatalf("unexpected rejected plugin diagnostic from Core: %+v", ev)
 		}
@@ -658,8 +722,8 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	if !slices.Contains(captured, "plugins.operation.finished:pyrefly.resolveLaunch") {
 		t.Fatalf("expected plugins.operation.finished:pyrefly.resolveLaunch in Core log facts, got %v", captured)
 	}
-	if !slices.Contains(captured, "plugins.operation.finished:lithe/build/discoverTests") {
-		t.Fatalf("expected plugins.operation.finished:lithe/build/discoverTests in Core log facts, got %v", captured)
+	if !slices.Equal(discoveryTerminals, []string{"plugins.operation.finished"}) {
+		t.Fatalf("expected one successful command discovery terminal, got %v (Core events %v)", discoveryTerminals, captured)
 	}
 
 	// 7. Verify Python Traceback outputLinkMatchers.
@@ -685,8 +749,62 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("unexpected output links: %+v", links)
 	}
 
-	// 8. Verify .venv toolchain resolution (including workspace trust gating) AND Core toolchains.decodeReply
-	// validation of scripts/toolchain_provider.py output!
+	// 8. Drive the real host's declared provider before creating a project-local .venv.
+	providerHost, ok := any(service).(interface {
+		ToolchainOptions(string, toolchain.Options) toolchain.Options
+	})
+	if !ok {
+		t.Fatal("the pinned host lacks on-demand toolchain providers; use a compatible desktop revision")
+	}
+	service.Contexts.Open(workspace)
+	t.Cleanup(func() { service.Contexts.Close(workspace) })
+	manifestSet := []json.RawMessage{normalizedManifest}
+	const providerID = pythonSupportPluginID + ":python"
+	pinFile := filepath.Join(workspace, ".python-version")
+	for _, expected := range registeredHomes {
+		if err := os.WriteFile(pinFile, []byte(filepath.Base(expected)+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := toolchain.Load(ctx, kernel, workspace, ".", manifestSet,
+			providerHost.ToolchainOptions(workspace, toolchain.Options{Home: providerHome, Environment: map[string]string{}}))
+		if err != nil {
+			t.Fatalf("load provider toolchain: %v", err)
+		}
+		if len(snapshot.Tools) != 1 || snapshot.Tools[0].Effective == nil {
+			t.Fatalf("no effective project interpreter: %+v", snapshot.Tools)
+		}
+		selection := snapshot.Tools[0].Effective
+		if selection.Home == nil {
+			t.Fatalf("provider selection has no installation home: %+v", selection)
+		}
+		actual, actualErr := os.Stat(*selection.Home)
+		wanted, wantedErr := os.Stat(expected)
+		if actualErr != nil || wantedErr != nil || !os.SameFile(actual, wanted) || selection.Provider != providerID {
+			t.Fatalf("provider selection = %+v, want %s from %s", selection, expected, providerID)
+		}
+	}
+	global, err := toolchain.Load(ctx, kernel, "", ".", manifestSet,
+		providerHost.ToolchainOptions("", toolchain.Options{Global: true, Home: providerHome, Environment: map[string]string{}}))
+	if err != nil {
+		t.Fatalf("load global provider toolchains: %v", err)
+	}
+	if len(global.Tools) != 1 {
+		t.Fatalf("expected one global tool, got %+v", global.Tools)
+	}
+	for _, expected := range registeredHomes {
+		wanted, err := os.Stat(expected)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.ContainsFunc(global.Tools[0].Installations, func(installation core.ToolchainInstallation) bool {
+			actual, err := os.Stat(installation.Home)
+			return err == nil && os.SameFile(actual, wanted) && installation.Provider == providerID
+		}) {
+			t.Fatalf("global provider did not register %s: %+v", expected, global.Tools[0])
+		}
+	}
+
+	// Verify .venv resolution retains its project trust gate.
 	venvCmd := exec.CommandContext(ctx, systemPython, "-m", "venv", ".venv")
 	venvCmd.Dir = workspace
 	if out, err := venvCmd.CombinedOutput(); err != nil {
@@ -731,123 +849,6 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		if resolvedExec != expectedVenvPython {
 			t.Fatalf("trusted .venv resolution = %q, want literal path %q", resolvedExec, expectedVenvPython)
 		}
-	}
-
-	// Verify real Core toolchains.decodeReply accepts scripts/toolchain_provider.py query_python_toolchains output.
-	extUvRoot := t.TempDir()
-	if resolvedExt, evalErr := filepath.EvalSymlinks(extUvRoot); evalErr == nil {
-		extUvRoot = resolvedExt
-	}
-	extPyHome := filepath.Join(extUvRoot, "cpython-3.12.6")
-	extPyBinDir := filepath.Join(extPyHome, "bin")
-	extPyExe := filepath.Join(extPyBinDir, "python3")
-	if runtime.GOOS == "windows" {
-		extPyBinDir = filepath.Join(extPyHome, "Scripts")
-		extPyExe = filepath.Join(extPyBinDir, "python.exe")
-	}
-	if err := os.MkdirAll(extPyBinDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(extPyExe, []byte("#!/bin/sh\necho Python 3.12.6\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(extPyHome, "pyvenv.cfg"), []byte("version_info = 3.12.6\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	tcReqParams := map[string]any{
-		"operationID": "tc-core-e2e-1",
-		"generation":  1,
-		"providerID":  "python",
-		"authority":   map[string]any{"kind": "local"},
-		"tools":       []string{"python"},
-		"workspace":   map[string]any{"rootID": "ws-1", "root": workspace, "directory": "."},
-		"context":     map[string]any{"contextID": "ctx-e2e-1", "generation": 1},
-	}
-	tcReqParamsJSON, _ := json.Marshal(tcReqParams)
-	pySnippet := fmt.Sprintf(
-		"import json, sys; sys.path.insert(0, %q); from pathlib import Path; from lithe_rpc import CallContext, CancelToken, DiagnosticsReporter; from toolchain_provider import query_python_toolchains, TOOLCHAIN_PROVIDER_DECLARATION; params = json.loads(sys.argv[1]); ctx = CallContext(cancel_token=CancelToken(), diagnostics=DiagnosticsReporter(lambda _: None, lambda _: True), suppress_cb=lambda: None); out = query_python_toolchains(params, ctx, home_dir=Path(%q), environ={'UV_PYTHON_INSTALL_DIR': %q}); print(json.dumps({'decl': TOOLCHAIN_PROVIDER_DECLARATION, 'reply': out}))",
-		filepath.Join(installedDir, "scripts"),
-		extUvRoot,
-		extUvRoot,
-	)
-	tcOutBytes, err := exec.CommandContext(ctx, systemPython, "-I", "-B", "-c", pySnippet, string(tcReqParamsJSON)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("running toolchain_provider.py failed: %v\n%s", err, tcOutBytes)
-	}
-	var tcBundle struct {
-		Decl  json.RawMessage `json:"decl"`
-		Reply json.RawMessage `json:"reply"`
-	}
-	if err := json.Unmarshal(tcOutBytes, &tcBundle); err != nil {
-		t.Fatalf("unmarshaling toolchain_provider output: %v\n%s", err, tcOutBytes)
-	}
-
-	// Build an in-memory manifest variant declaring toolchainProviders + packaged backend so Core toolchains.decodeReply
-	// checks every field, path, installation, and statement emitted by toolchain_provider.py!
-	var tcManifestMap map[string]any
-	if err := json.Unmarshal(normalizedManifest, &tcManifestMap); err != nil {
-		t.Fatal(err)
-	}
-	reqMap, _ := tcManifestMap["requires"].(map[string]any)
-	reqMap["toolchainProviders"] = 0
-	perms, _ := tcManifestMap["permissions"].([]any)
-	tcManifestMap["permissions"] = append(perms, "toolchains.provide")
-	tcManifestMap["backend"] = map[string]any{
-		"launch": map[string]any{"kind": "packaged", "path": expectedPyreflyRel},
-	}
-	tcManifestMap["toolchainProviders"] = []any{tcBundle.Decl}
-	tcManifestBytes, _ := json.Marshal(tcManifestMap)
-	tcRegistryInput, err := toolchain.RegistryInput([]json.RawMessage{tcManifestBytes})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	pyprojectPath := filepath.Join(workspace, "pyproject.toml")
-	pyVerPath := filepath.Join(workspace, ".python-version")
-	condaTxtPath := filepath.Join(extUvRoot, ".conda", "environments.txt")
-	fsFacts := []core.ToolchainFileFact{
-		{Path: workspace, CanonicalPath: workspace, Kind: "directory"},
-		{Path: extUvRoot, CanonicalPath: extUvRoot, Kind: "directory"},
-		{Path: extPyHome, CanonicalPath: extPyHome, Kind: "directory"},
-		{Path: extPyExe, CanonicalPath: extPyExe, Kind: "file", Executable: true},
-		{Path: pyprojectPath, CanonicalPath: pyprojectPath, Kind: "file"},
-		{Path: pyVerPath, CanonicalPath: pyVerPath, Kind: "missing"},
-		{Path: condaTxtPath, CanonicalPath: condaTxtPath, Kind: "missing"},
-	}
-	wireReq, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      "req-1",
-		"method":  "toolchains/query",
-		"params":  tcReqParams,
-	})
-	wireResp, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      "req-1",
-		"result":  tcBundle.Reply,
-	})
-	var decodeReplyOutcome struct {
-		Status   string                     `json:"status"`
-		Error    *core.MarketplaceRejection `json:"error"`
-		Snapshot json.RawMessage            `json:"snapshot"`
-	}
-	if err := kernel.Execute(ctx, "toolchains.decodeReply", core.ToolchainQuery{
-		Registry:          tcRegistryInput,
-		PluginID:          pythonSupportPluginID,
-		Request:           wireReq,
-		Response:          wireResp,
-		CurrentGeneration: 1,
-		Filesystem:        fsFacts,
-		Platform:          toolchain.PlatformName(runtime.GOOS),
-		WorkspaceRoots:    []string{workspace},
-	}, &decodeReplyOutcome); err != nil {
-		t.Fatalf("toolchains.decodeReply failed: %v", err)
-	}
-	if decodeReplyOutcome.Status != "ok" {
-		t.Fatalf("toolchains.decodeReply rejected reply: status=%s err=%+v", decodeReplyOutcome.Status, decodeReplyOutcome.Error)
-	}
-	if !strings.Contains(string(decodeReplyOutcome.Snapshot), "3.12.6") {
-		t.Fatalf("expected decoded toolchain snapshot to include installation 3.12.6, got %s", decodeReplyOutcome.Snapshot)
 	}
 
 	// Shut down backend cleanly BEFORE checking package immutability so any shutdown write would be caught too!

@@ -4,11 +4,28 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { readZipEntries } from "../lib/archive.mjs";
+import { backendPath } from "../lib/backend.mjs";
 import { ASSET_PREFIX, PACKAGE_ID } from "../package.mjs";
 
 const baseManifest = JSON.parse(readFileSync(`${PACKAGE_ID}/plugin.json`, "utf8"));
 const lock = JSON.parse(readFileSync("vendor-lock.json", "utf8"));
 const version = baseManifest.version;
+
+function checkBackendArchitecture(bytes, platform) {
+  const arm = platform.endsWith("-arm64");
+  if (platform.startsWith("windows-")) {
+    assert.equal(bytes.toString("ascii", 0, 2), "MZ");
+    const peHeader = bytes.readUInt32LE(0x3c);
+    assert.equal(bytes.readUInt32LE(peHeader), 0x4550);
+    assert.equal(bytes.readUInt16LE(peHeader + 4), arm ? 0xaa64 : 0x8664);
+  } else if (platform.startsWith("linux-")) {
+    assert.equal(bytes.readUInt32BE(0), 0x7f454c46);
+    assert.equal(bytes.readUInt16LE(18), arm ? 183 : 62);
+  } else {
+    assert.equal(bytes.readUInt32LE(0), 0xfeedfacf);
+    assert.equal(bytes.readUInt32LE(4), arm ? 0x0100000c : 0x01000007);
+  }
+}
 
 function builtArchives() {
   if (!existsSync("dist")) return [];
@@ -25,6 +42,9 @@ function builtArchives() {
 test("at least one release archive exists in dist/ and matches vendor-lock platforms", () => {
   const archives = builtArchives();
   assert.ok(archives.length >= 1, "Expected at least one built archive in dist/");
+  if (process.env.LITHE_EXPECT_ALL_ARCHIVES === "1") {
+    assert.deepEqual(archives.map((archive) => archive.platform), Object.keys(lock.pyrefly.platforms).sort());
+  }
   for (const archive of archives) {
     assert.ok(lock.pyrefly.platforms[archive.platform], `Unexpected platform ${archive.platform} for ${archive.name}`);
   }
@@ -39,6 +59,7 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
     const folded = new Set();
     let manifestEntry = null;
     let pyreflyEntry = null;
+    let backendEntry = null;
 
     for (const entry of entries) {
       assert.equal(entry.isSymlink, false, `${archive.name}: symbolic link forbidden (${entry.name})`);
@@ -60,22 +81,27 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
       if (entry.name === `${PACKAGE_ID}/plugin.json`) manifestEntry = entry;
       const expectedPyrefly = `${PACKAGE_ID}/${lock.pyrefly.platforms[archive.platform].packagePath}`;
       if (entry.name === expectedPyrefly) pyreflyEntry = entry;
+      if (entry.name === `${PACKAGE_ID}/${backendPath(archive.platform)}`) backendEntry = entry;
     }
 
     assert.ok(manifestEntry, `${archive.name}: missing plugin.json`);
     assert.ok(pyreflyEntry, `${archive.name}: missing pyrefly binary`);
     assert.equal(pyreflyEntry.unixMode & 0o111, 0o111, `${archive.name}: pyrefly binary must have executable mode`);
 
+    assert.ok(backendEntry, `${archive.name}: missing the Rust backend`);
+    assert.equal(backendEntry.unixMode & 0o111, 0o111, `${archive.name}: backend must have executable mode`);
+    checkBackendArchitecture(backendEntry.data, archive.platform);
+
     for (const required of [
       `${PACKAGE_ID}/LICENSE`,
       `${PACKAGE_ID}/THIRD-PARTY-NOTICES.txt`,
+      `${PACKAGE_ID}/RUST-THIRD-PARTY-NOTICES.txt`,
       `${PACKAGE_ID}/l10n/zh-Hans.json`,
       `${PACKAGE_ID}/scripts/lithe_rpc.py`,
       `${PACKAGE_ID}/scripts/windows_job.py`,
-      `${PACKAGE_ID}/scripts/backend.py`,
       `${PACKAGE_ID}/scripts/build_model.py`,
       `${PACKAGE_ID}/scripts/build_provider.py`,
-      `${PACKAGE_ID}/scripts/toolchain_provider.py`,
+      `${PACKAGE_ID}/scripts/discover_tests.py`,
       `${PACKAGE_ID}/scripts/debugpy_adapter.py`,
       `${PACKAGE_ID}/vendor/debugpy/adapter/__main__.py`,
       `${PACKAGE_ID}/vendor/debugpy/ThirdPartyNotices.txt`,
@@ -95,6 +121,13 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
     assert.deepEqual(manifest.requires, baseManifest.requires);
     assert.deepEqual(manifest.vendor, baseManifest.vendor);
 
+    assert.deepEqual(manifest.backend, { launch: { kind: "packaged", path: backendPath(archive.platform) } });
+    assert.deepEqual(manifest.toolchainProviders, baseManifest.toolchainProviders);
+    assert.equal(manifest.requires.toolchainProviders, 0);
+    assert.deepEqual(
+      manifest.buildSystems.find(({ id }) => id === "python").test,
+      baseManifest.buildSystems.find(({ id }) => id === "python").test,
+    );
     const isWindows = archive.platform.startsWith("windows-");
     const pyreflyServer = manifest.languageServers.find((s) => s.languageID === "python");
     assert.deepEqual(pyreflyServer.launch, {

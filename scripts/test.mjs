@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Runs static contract checks, unit + protocol tests for scripts/{backend,build_model,build_provider,toolchain_provider}.py,
+// Runs static contract checks, unit + protocol tests for the Rust backend and Python build scripts,
 // and live end-to-end smoke tests against the unpacked plugin package (backend-resolved pyrefly launch with
 // external tools.python.executable injection and .venv fallback, toolchains/query, pytest --collect-only discovery
 // and JUnit XML execution, cancellation process-tree cleanup, project templates, and debugpy DAP launch),
@@ -12,6 +12,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -25,9 +26,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, normalize, resolve } from "node:path";
+import { basename, dirname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readZipEntries } from "./lib/archive.mjs";
+import { backendPath } from "./lib/backend.mjs";
 import { ASSET_PREFIX, manifestForPlatform, PACKAGE_ID, packagePlatforms, sha256File } from "./package.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -284,7 +286,7 @@ async function check(name, body) {
   }
 }
 
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), "lithe-python-test-")));
+const scratch = realpathSync.native(mkdtempSync(join(tmpdir(), "lithe-python-test-")));
 let unpackedPluginDir = null;
 
 try {
@@ -313,11 +315,21 @@ try {
       assert.equal(variant.schemaVersion, 0);
       assert.equal(variant.pluginAPIVersion, 0);
       assert.equal(variant.id, "io.github.lithe-idea.python-support");
-      assert.equal(variant.version, "0.2.0");
+      assert.equal(variant.version, sourceManifest.version);
       assert.equal(variant.vendor.id, "io.github.lithe-idea");
       assert.equal(variant.vendor.signatureRequirement, "none");
       assert.equal("commandInstallers" in variant, false, "must not declare commandInstallers");
-      assert.equal("toolchainProviders" in variant, false, "must omit toolchainProviders until desktop host declares it");
+      assert.deepEqual(variant.toolchainProviders, [{
+        id: "python",
+        displayName: "Python Environments",
+        tools: ["python"],
+        watchFiles: [
+          { pattern: ".python-version", reader: "compatible" },
+          { pattern: "pyproject.toml", reader: "native" },
+          { pattern: "Pipfile", reader: "native" },
+          { pattern: "poetry.lock", reader: "native" },
+        ],
+      }]);
       assert.equal("$schema" in variant, false, "plugin.json must not contain $schema");
       assert.deepEqual(Object.keys(variant.requires).sort(), [
         "backend",
@@ -330,9 +342,10 @@ try {
         "projectGenerators",
         "settings",
         "toolDefinitions",
+        "toolchainProviders",
       ]);
-      for (const ver of Object.values(variant.requires)) {
-        assert.equal(ver, 0);
+      for (const [capability, version] of Object.entries(variant.requires)) {
+        assert.equal(version, capability === "buildSystems" ? 1 : 0);
       }
       assert.deepEqual([...variant.permissions].sort(), [
         "backend.launch",
@@ -341,17 +354,11 @@ try {
         "languageServer.launch",
         "process.build",
         "project.generate",
+        "toolchains.provide",
       ]);
 
       assert.deepEqual(variant.backend, {
-        launch: {
-          kind: "runtime",
-          tool: "python",
-          minimumVersion: "3.9",
-          runtimeArguments: ["-I", "-B"],
-          entry: "scripts/backend.py",
-        },
-        arguments: ["--state", "${stateDir}"],
+        launch: { kind: "packaged", path: backendPath(platform) },
       });
 
       const pyLang = variant.languages[0];
@@ -389,7 +396,12 @@ try {
       assert.equal(pyBuild.provider.mayUseNetwork, false);
       assert.deepEqual(pyBuild.model, { source: "provider" });
       assert.equal(pyBuild.test.source, "provider");
-      assert.equal(pyBuild.test.discovery, true);
+      assert.equal("discovery" in pyBuild.test, false);
+      assert.deepEqual(pyBuild.test.discoveryCommand, {
+        arguments: ["-I", "-B", "${pluginDir}/scripts/discover_tests.py", "${outputFile}", "${root}", "${optionArguments}"],
+        executesProjectCode: true,
+        mayUseNetwork: false,
+      });
       assert.deepEqual(pyBuild.test.filters, ["suite", "case"]);
       assert.deepEqual(pyBuild.test.arguments, []);
       assert.deepEqual(pyBuild.test.results, {
@@ -435,7 +447,7 @@ try {
   const beforeSnapshot = snapshotDirectoryHashes(unpackedPluginDir);
 
   const buildModelScript = join(unpackedPluginDir, "scripts", "build_model.py");
-  const backendScript = join(unpackedPluginDir, "scripts", "backend.py");
+  const backendExecutable = join(unpackedPluginDir, pluginManifest.backend.launch.path);
   const buildProviderScript = join(unpackedPluginDir, "scripts", "build_provider.py");
 
   await check("build_model.py discovers PEP 621 scripts, src/ packages, tests, and .venv/.conda exclusions", () => {
@@ -547,7 +559,7 @@ try {
     assert.ok(!missing.stderr.includes("secret-path-token-do-not-log"), "stderr must never echo raw paths");
   });
 
-  await check("backend.py negotiates litheLogging + litheFunctions, resolves Unix/Windows pyrefly launch, and injects external tools.python.executable into pyrefly LSP", async () => {
+  await check("The packaged SDK backend negotiates litheLogging + litheFunctions, resolves Unix/Windows pyrefly launch, and injects external tools.python.executable into pyrefly LSP", async () => {
     const stateDir = join(scratch, "backend-state");
     const wsStateDir = join(scratch, "backend-ws-state");
     const logDir = join(scratch, "backend-log");
@@ -565,7 +577,7 @@ try {
     mkdirSync(join(extSite, "external_env_pkg"), { recursive: true });
     writeFileSync(join(extSite, "external_env_pkg", "__init__.py"), "def magic_number() -> int:\n    return 7\n");
 
-    const child = spawn(pythonCmd, ["-I", "-B", backendScript, "--state", stateDir], {
+    const child = spawn(backendExecutable, [], {
       cwd: scratch,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -805,7 +817,7 @@ try {
       });
       const unknownMethodErr = await peer.waitFor((m) => m.id === 81, "unknown method error");
       assert.equal(unknownMethodErr.error?.code, -32601);
-      assert.equal(unknownMethodErr.error?.message, "The requested method is not supported.");
+      assert.ok(unknownMethodErr.error?.message, "unknown method must return a diagnostic");
       assert.ok(!unknownMethodErr.error.message.includes("secret"));
 
       peer.send({
@@ -820,7 +832,7 @@ try {
       });
       const unknownFnErr = await peer.waitFor((m) => m.id === 82, "unknown function error");
       assert.equal(unknownFnErr.error?.code, -32602);
-      assert.equal(unknownFnErr.error?.message, "The requested plugin function is not registered.");
+      assert.ok(unknownFnErr.error?.message, "unknown function must return a diagnostic");
       assert.ok(!unknownFnErr.error.message.includes("secret"));
 
       // 7. Clean shutdown + exit without creating any custom log files.
@@ -829,7 +841,7 @@ try {
       peer.send({ jsonrpc: "2.0", method: "exit", params: null });
       const exitCode = await peer.waitExit();
       assert.equal(exitCode, 0);
-      assert.deepEqual(readdirSync(logDir), [], "backend.py must create zero custom log files");
+      assert.deepEqual(readdirSync(logDir), [], "The SDK backend must create zero custom log files");
     } finally {
       await peer.closeAndKill();
     }
@@ -919,13 +931,13 @@ try {
     }
   });
 
-  await check("toolchain_provider.py answers toolchains/query for conda, uv, pyenv, Poetry, Pipenv, .python-version, and pyproject.toml", async () => {
+  await check("The packaged provider answers toolchains/query for conda, uv, pyenv, Poetry, Pipenv, .python-version, and pyproject.toml", async () => {
     const fakeHome = join(scratch, "fake-home");
     const condaEnvDir = join(scratch, "conda-envs", "ml-311");
     const uvPyDir = join(scratch, "uv-pythons", "cpython-3.12.6-macos-aarch64-none");
     const pyenvVerDir = join(scratch, "pyenv-root", "versions", "3.10.14");
     const workonRoot = join(scratch, "workon-envs");
-    const wsRoot = join(scratch, "tc-workspace");
+    const wsRoot = join(scratch, "tc-workspace (venv)");
     mkdirSync(wsRoot, { recursive: true });
     // Workspace-local .venv MUST be excluded from provider installations per toolchains contract!
     const wsLocalVenv = join(wsRoot, ".venv");
@@ -963,23 +975,26 @@ try {
     );
     writeFileSync(join(wsRoot, "Pipfile"), '[[source]]\nname = "pypi"\n');
 
-    // Compute pipenv prefix via python helper to create matching WORKON_HOME env.
-    const pipenvName = run(pythonCmd, [
-      "-I",
-      "-B",
-      "-c",
-      `import sys; sys.path.insert(0, ${JSON.stringify(join(unpackedPluginDir, "scripts"))}); from pathlib import Path; from toolchain_provider import _pipenv_virtualenv_prefix; print(_pipenv_virtualenv_prefix(Path(sys.argv[1]).resolve()))`,
-      wsRoot,
-    ]).trim();
+    const workspaceDirectory = realpathSync.native(wsRoot);
+    const workspaceHash = (path) => createHash("sha256").update(path).digest("base64url").slice(0, 8);
+    // Pipenv derives the default environment name from the full Pipfile path.
+    const pipenvName = `tc-workspace__venv_-${workspaceHash(join(workspaceDirectory, "Pipfile"))}`;
     const pipenvDir = join(workonRoot, pipenvName);
-    makeFakePythonHome(pipenvDir, "3.12.3", false);
+    makeFakePythonHome(pipenvDir, "3.12.3");
+    writeFileSync(join(wsRoot, "poetry.lock"), "");
+    const poetryRoot = join(scratch, "poetry");
+    const poetryProjectPath = process.platform === "win32" ? workspaceDirectory.toLowerCase() : workspaceDirectory;
+    const poetryDir = join(poetryRoot, `tc-demo-${workspaceHash(poetryProjectPath)}-py3.12`);
+    makeFakePythonHome(poetryDir, "3.12.1");
 
     const discoveryEnv = {
       HOME: fakeHome,
       USERPROFILE: fakeHome,
+      PATH: "",
       UV_PYTHON_INSTALL_DIR: dirname(uvPyDir),
       PYENV_ROOT: join(scratch, "pyenv-root"),
       WORKON_HOME: workonRoot,
+      POETRY_VIRTUALENVS_PATH: poetryRoot,
       CONDA_ENVS_PATH: "",
       CONDA_PREFIX: "",
     };
@@ -988,7 +1003,7 @@ try {
     const inherited = Object.fromEntries(
       Object.entries(process.env).filter(([key]) => !(key.toUpperCase() in discoveryEnv)),
     );
-    const child = spawn(pythonCmd, ["-I", "-B", backendScript, "--state", join(scratch, "tc-state")], {
+    const child = spawn(backendExecutable, [], {
       cwd: scratch,
       env: { ...inherited, ...discoveryEnv },
       stdio: ["pipe", "pipe", "pipe"],
@@ -1011,54 +1026,116 @@ try {
       });
       await peer.waitFor((m) => m.id === 1 && "result" in m, "toolchain backend init");
 
-      peer.send({
-        jsonrpc: "2.0",
-        id: 2,
-        method: "toolchains/query",
-        params: {
-          operationID: "tc-op-1",
-          generation: 3,
-          providerID: "python",
-          authority: { kind: "local" },
-          tools: ["python"],
-          workspace: { rootID: "root-1", root: wsRoot, directory: "." },
-          context: { contextID: "ctx-tc", generation: 1 },
-        },
-      });
-      const reply = await peer.waitFor((m) => m.id === 2, "toolchains/query reply");
+      async function queryProject(id, operationID) {
+        peer.send({
+          jsonrpc: "2.0",
+          id,
+          method: "toolchains/query",
+          params: {
+            operationID,
+            generation: id + 1,
+            providerID: "python",
+            authority: { kind: "local" },
+            tools: ["python"],
+            workspace: { rootID: "root-1", root: wsRoot, directory: "." },
+            context: { contextID: "ctx-tc", generation: 1 },
+          },
+        });
+        return peer.waitFor((m) => m.id === id, "toolchains/query reply");
+      }
+      const reply = await queryProject(2, "tc-op-1");
       assert.equal(reply.result.operationID, "tc-op-1");
       assert.equal(reply.result.generation, 3);
       assert.equal(reply.result.providerID, "python");
 
-      // Python and Node may preserve different drive letter and directory
-      // casing for a real path on Windows. Compare native path identities.
+      // Rust and Node may preserve different drive letter and directory casing
+      // on Windows. Resolve candidate homes and statement sources separately.
       const pathKey = (path) => {
         const nativePath = normalize(path);
         return process.platform === "win32" ? nativePath.toLowerCase() : nativePath;
       };
       const expectedPath = (path) => pathKey(realpathSync.native(path));
-      assert.ok(
-        reply.result.watch.map(pathKey).includes(expectedPath(condaRegistry)),
-        "Expected toolchain discovery to read the fixture home",
+      const watch = reply.result.watch.map(pathKey);
+      // The registry watch uses the configured home path so it still works
+      // when conda has yet to create the registry file.
+      assert.deepEqual(
+        watch.filter((path) => basename(path) === "environments.txt"),
+        [pathKey(condaRegistry)],
       );
       const homes = reply.result.installations.map((installation) => pathKey(installation.home));
       assert.ok(homes.includes(expectedPath(condaEnvDir)), "Expected ~/.conda/environments.txt installation");
       assert.ok(homes.includes(expectedPath(uvPyDir)), "Expected UV_PYTHON_INSTALL_DIR installation");
       assert.ok(homes.includes(expectedPath(pyenvVerDir)), "Expected PYENV_ROOT installation");
       assert.ok(homes.includes(expectedPath(pipenvDir)), "Expected WORKON_HOME Pipenv installation");
+      assert.ok(homes.includes(expectedPath(poetryDir)), "Expected configured Poetry installation");
+      assert.ok(watch.includes(expectedPath(join(wsRoot, "poetry.lock"))));
       assert.equal(homes.includes(expectedPath(wsLocalVenv)), false, "Must NEVER return workspace-local .venv");
 
       const bySource = new Map(reply.result.statements.map((statement) => [pathKey(statement.source), statement]));
-      const pyVerStmt = bySource.get(expectedPath(join(wsRoot, ".python-version")));
-      assert.ok(pyVerStmt);
-      assert.equal(pathKey(pyVerStmt.installation), expectedPath(condaEnvDir));
-      const pyprojStmt = bySource.get(expectedPath(join(wsRoot, "pyproject.toml")));
-      assert.ok(pyprojStmt);
-      assert.equal(pathKey(pyprojStmt.installation), expectedPath(uvPyDir));
+      const versionPath = join(wsRoot, ".python-version");
+      const projectPath = join(wsRoot, "pyproject.toml");
+      const declarations = (response) => response.result.statements.filter((statement) => statement.kind === "declaration");
+      assert.equal(
+        declarations(reply).length,
+        1,
+        "The provider must return one version declaration per directory to avoid a Core providerConflict",
+      );
+      const [unmet] = declarations(reply);
+      assert.equal(pathKey(unmet.source), expectedPath(versionPath));
+      assert.equal(unmet.request, "3.11");
+      assert.equal(unmet.installation, null, "3.11 does not satisfy the project requirement");
+      for (const watched of [versionPath, projectPath]) {
+        assert.ok(watch.includes(expectedPath(watched)));
+      }
+
+      writeFileSync(versionPath, "3.12\n");
+      const [compatible] = declarations(await queryProject(6, "tc-op-compatible"));
+      assert.equal(pathKey(compatible.source), expectedPath(versionPath));
+      assert.equal(pathKey(compatible.installation), expectedPath(uvPyDir));
+
+      rmSync(versionPath);
+      const [projectOnly] = declarations(await queryProject(7, "tc-op-project-only"));
+      assert.equal(pathKey(projectOnly.source), expectedPath(projectPath));
+      assert.equal(pathKey(projectOnly.installation), expectedPath(uvPyDir));
       const pipfileStmt = bySource.get(expectedPath(join(wsRoot, "Pipfile")));
       assert.ok(pipfileStmt);
       assert.equal(pipfileStmt.kind, "environment");
       assert.equal(pathKey(pipfileStmt.installation), expectedPath(pipenvDir));
+
+      writeFileSync(projectPath, '[project]\nname = "tc-demo"\nrequires-python = ">=3.12.5"\n');
+      const stricter = await queryProject(8, "tc-op-incompatible-pipenv");
+      assert.equal(
+        stricter.result.statements.some((statement) => pathKey(statement.source) === expectedPath(join(wsRoot, "Pipfile"))),
+        false,
+        "A Pipenv environment outside requires-python must not override the compatible declaration",
+      );
+      assert.equal(pathKey(declarations(stricter)[0].installation), expectedPath(uvPyDir));
+
+      const poetryStmt = bySource.get(expectedPath(join(wsRoot, "poetry.lock")));
+      assert.ok(poetryStmt);
+      assert.equal(poetryStmt.kind, "environment");
+      assert.equal(pathKey(poetryStmt.installation), expectedPath(poetryDir));
+
+      assert.equal(peer.allReceived.some((m) => m.method === "lithe/log" && m.params?.operationId === "tc-op-1"), false,
+        "A successful discovery must not emit an INFO terminal event");
+
+      peer.send({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "toolchains/query",
+        params: {
+          operationID: "tc-op-global",
+          generation: 4,
+          providerID: "python",
+          authority: { kind: "local" },
+          tools: ["python"],
+          workspace: null,
+          context: null,
+        },
+      });
+      const global = await peer.waitFor((m) => m.id === 5, "global toolchain backend reply");
+      assert.deepEqual(global.result.statements, []);
+      assert.ok(global.result.installations.some((entry) => pathKey(entry.home) === expectedPath(condaEnvDir)));
 
       // Remote authority must return -32071 plugin.toolchain.authorityUnsupported.
       peer.send({
@@ -1069,7 +1146,7 @@ try {
           operationID: "tc-op-remote",
           generation: 4,
           providerID: "python",
-          authority: { kind: "remote", hostID: "ssh-box" },
+          authority: { kind: "remote", id: "ssh-box" },
           tools: ["python"],
           workspace: null,
           context: null,
@@ -1088,7 +1165,7 @@ try {
     }
   });
 
-  await check("build_provider.py executes model (with degraded/recovered), pytest --collect-only discovery, pytest JUnit XML test runs, runEntrypoints, and cancellation cleanup", async () => {
+  await check("The packaged discovery command collects pytest selectors and the provider runs them exactly, reports JUnit, and handles cancellation", async () => {
     const pytestExecutable = resolvePytestRuntime();
     const noPytestExec = ensureNoPytestPython(scratch);
 
@@ -1100,10 +1177,17 @@ try {
     // Start with an intentionally malformed pyproject.toml to verify degraded -> recovered!
     writeFileSync(join(wsDir, "pyproject.toml"), "[project\nname = 'broken'\n");
     writeFileSync(join(wsDir, "worker.py"), 'if __name__ == "__main__":\n    print("run worker")\n');
+    writeFileSync(join(wsDir, "conftest.py"), [
+      "def pytest_sessionstart(session):",
+      "    if session.config.option.collectonly:",
+      "        session.config.cache.set('lithe/discovery-test', True)",
+      "",
+    ].join("\n"));
     writeFileSync(
       join(wsDir, "tests", "test_calc.py"),
       [
         "import pytest",
+        "import worker",
         "",
         "@pytest.mark.parametrize('x,expected', [(2, 6), (3, 9)])",
         "def test_scale(x, expected):",
@@ -1115,7 +1199,26 @@ try {
       ].join("\n") + "\n",
     );
 
-    const child = spawn(pythonCmd, ["-I", "-B", buildProviderScript, "--cache", cacheDir], {
+    const discoveryCommand = pluginManifest.buildSystems.find(({ id }) => id === "python").test.discoveryCommand;
+    assert.ok(discoveryCommand, "The installed plugin must declare a test discovery command");
+    function discover(label, { cwd = wsDir, root = ".", executable = pytestExecutable, options = [] } = {}) {
+      const attemptDir = join(cacheDir, label);
+      mkdirSync(attemptDir);
+      const report = join(attemptDir, "tests.json");
+      const args = discoveryCommand.arguments.flatMap((value) => value === "${optionArguments}"
+        ? options
+        : value.replace("${pluginDir}", unpackedPluginDir).replace("${outputFile}", report).replace("${root}", root));
+      const result = spawnSync(executable, args, {
+        cwd,
+        encoding: "utf8",
+        timeout: COMMAND_TIMEOUT_MS,
+        windowsHide: true,
+      });
+      if (result.error) throw result.error;
+      return { ...result, report };
+    }
+
+    const child = spawn(pythonCmd, ["-I", "-B", buildProviderScript], {
       cwd: wsDir,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -1205,63 +1308,52 @@ try {
         "Expected recovered pyproject_restored log",
       );
 
-      // 2. lithe/build/discoverTests via pytest --collect-only.
-      peer.send({
-        jsonrpc: "2.0",
-        id: 4,
-        method: "lithe/build/discoverTests",
-        params: {
-          operationID: "op-discover-1",
-          buildSystemID: "python",
-          root: ".",
-          tool: { executable: pytestExecutable },
-          options: {},
-          optionArguments: [],
-          environment: {},
-        },
-      });
-      const discResp = await peer.waitFor((m) => m.id === 4, "discoverTests response");
-      assert.equal(discResp.result.format, "litheTestDiscovery");
-      assert.equal(discResp.result.version, 0);
-      assert.equal(existsSync(join(wsDir, ".pytest_cache")), false, "discoverTests must write cache to workspaceStateDir, not workspace");
+      // 2. Run the packaged command with the host's output path and project cwd.
+      const discovered = discover("collected");
+      assert.equal(discovered.status, 0, discovered.stdout + discovered.stderr);
+      const discovery = JSON.parse(readFileSync(discovered.report, "utf8"));
+      assert.equal(discovery.format, "litheTestDiscovery");
+      assert.equal(discovery.version, 0);
+      assert.equal(existsSync(join(wsDir, ".pytest_cache")), false);
+      assert.equal(existsSync(join(dirname(discovered.report), "pytest-cache")), true);
 
-      const discoveredCases = discResp.result.tests.map((t) => `${t.suite}::${t.case}`).sort();
+      const discoveredCases = discovery.tests.map((t) => `${t.suite}::${t.case}`).sort();
       assert.deepEqual(discoveredCases, [
         "tests/test_calc.py::TestCalc::test_add",
         "tests/test_calc.py::test_scale[2-6]",
         "tests/test_calc.py::test_scale[3-9]",
       ]);
-      for (const item of discResp.result.tests) {
+      for (const item of discovery.tests) {
         assert.deepEqual(item.project, { name: "calc-suite", path: "." });
       }
 
-      // 3. Missing pytest returns controlled PluginError python.pytestUnavailable + operationFailed ERROR.
-      peer.send({
-        jsonrpc: "2.0",
-        id: 5,
-        method: "lithe/build/discoverTests",
-        params: {
-          operationID: "op-discover-missing",
-          buildSystemID: "python",
-          root: ".",
-          tool: { executable: noPytestExec },
-          options: {},
-          optionArguments: [],
-          environment: {},
-        },
+      // 3. Empty projects complete, while missing pytest and failed collection publish no report.
+      const missingPytest = discover("missing-pytest", { executable: noPytestExec });
+      assert.equal(missingPytest.status, 197);
+      assert.match(missingPytest.stderr, /pytest unavailable/);
+      assert.equal(existsSync(missingPytest.report), false);
+
+      const nested = join(wsDir, "nested project");
+      mkdirSync(nested);
+      const empty = discover("empty", { cwd: nested, root: "nested project" });
+      assert.equal(empty.status, 0, empty.stdout + empty.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(empty.report, "utf8")), {
+        format: "litheTestDiscovery", version: 0, tests: [],
       });
-      const missingPytest = await peer.waitFor((m) => m.id === 5, "missing pytest error");
-      assert.equal(missingPytest.error?.code, -32000);
-      assert.equal(missingPytest.error?.data?.code, "python.pytestUnavailable");
-      assert.ok(
-        peer.allReceived.some(
-          (m) =>
-            m.method === "lithe/log" &&
-            m.params?.operationId === "op-discover-missing" &&
-            m.params?.kind === "operationFailed" &&
-            m.params?.code === "python.pytestUnavailable",
-        ),
-      );
+      writeFileSync(join(nested, "test_nested.py"), "def test_nested():\n    assert True\n");
+      const nestedDiscovery = discover("nested", { cwd: nested, root: "nested project" });
+      assert.equal(nestedDiscovery.status, 0, nestedDiscovery.stdout + nestedDiscovery.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(nestedDiscovery.report, "utf8")).tests, [{
+        suite: "test_nested.py", case: "test_nested", project: { name: "nested project", path: "nested project" },
+      }]);
+      rmSync(nested, { recursive: true });
+
+      const brokenTest = join(wsDir, "tests", "test_collection_error.py");
+      writeFileSync(brokenTest, "def test_broken():\n    assert (\n");
+      const collectionError = discover("collection-error");
+      assert.equal(collectionError.status, 2);
+      assert.equal(existsSync(collectionError.report), false);
+      rmSync(brokenTest);
 
       // 4. Execute a single discovered parameterized test via lithe/build/test and verify progress + JUnit XML.
       peer.send({
@@ -1297,11 +1389,15 @@ try {
       assert.match(junitXml, /test_scale\[2-6\]/);
 
       writeFileSync(join(wsDir, "tests", "test_names.py"), [
-        "import pytest",
         "def test_add():",
         "    assert True",
         "def test_additional():",
         "    assert True",
+        "",
+      ].join("\n"));
+      const oversizedTest = join(wsDir, "tests", "test_long_id.py");
+      writeFileSync(oversizedTest, [
+        "import pytest",
         "@pytest.mark.parametrize('value', [pytest.param(1, id='é' * 600)])",
         "def test_long_id(value):",
         "    assert value == 1",
@@ -1320,22 +1416,19 @@ try {
       assert.equal(caseOnly.error?.data?.code, "python.invalidTestSelector");
       assert.equal(readFileSync(junitXmlPath, "utf8"), junitXml);
 
-      peer.send({
-        jsonrpc: "2.0", id: 69, method: "lithe/build/discoverTests",
-        params: {
-          operationID: "op-discover-long-id",
-          buildSystemID: "python", root: ".", tool: { executable: pytestExecutable },
-          options: {}, optionArguments: [], environment: {},
-        },
-      });
-      const withLongId = await peer.waitFor((m) => m.id === 69, "discover with oversized UTF-8 test ID");
+      const withLongId = discover("oversized-id");
+      assert.notEqual(withLongId.status, 0);
+      assert.match(withLongId.stderr, /invalid or oversized test selectors/);
+      assert.equal(existsSync(withLongId.report), false, "An oversized UTF-8 ID must fail the whole discovery");
+      rmSync(oversizedTest);
+      const withDoctest = discover("doctest", { options: ["--doctest-glob=test_notes.txt"] });
+      assert.equal(withDoctest.status, 0, withDoctest.stdout + withDoctest.stderr);
+      const tests = JSON.parse(readFileSync(withDoctest.report, "utf8")).tests;
       assert.deepEqual(
-        withLongId.result.tests.filter(({ suite }) => suite === "tests/test_names.py").map(({ case: name }) => name).sort(),
+        tests.filter(({ suite }) => suite === "tests/test_names.py").map(({ case: name }) => name).sort(),
         ["test_add", "test_additional"],
       );
-      assert.ok(peer.allReceived.some((m) => m.method === "lithe/log"
-        && m.params?.operationId === "op-discover-long-id" && m.params?.code === "test_discovery_truncated"));
-      const doctest = withLongId.result.tests.find(({ suite }) => suite === "test_notes.txt");
+      const doctest = tests.find(({ suite }) => suite === "test_notes.txt");
       assert.ok(doctest, "pytest must discover a root-level doctest");
       peer.send({
         jsonrpc: "2.0", id: 70, method: "lithe/build/test",
@@ -1476,7 +1569,7 @@ try {
       );
 
       // 6. $/cancelRequest terminates active pytest subprocess tree cleanly with zero orphan processes!
-      const pidFile = join(scratch, "slow-collect.pid");
+      const pidFile = join(scratch, "slow-test.pid");
       writeFileSync(
         join(wsDir, "tests", "test_blocking.py"),
         [
@@ -1491,12 +1584,13 @@ try {
       peer.send({
         jsonrpc: "2.0",
         id: 8,
-        method: "lithe/build/discoverTests",
+        method: "lithe/build/test",
         params: {
-          operationID: "op-discover-cancel",
+          operationID: "op-test-cancel",
           buildSystemID: "python",
           root: ".",
           tool: { executable: pytestExecutable },
+          suite: "tests/test_blocking.py",
           options: {},
           optionArguments: [],
           environment: {},
@@ -1512,10 +1606,10 @@ try {
       assert.ok(Number.isInteger(childPid) && childPid > 0);
 
       peer.send({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id: 8 } });
-      const cancelResp = await peer.waitFor((m) => m.id === 8, "cancelled discoverTests response", 10_000);
+      const cancelResp = await peer.waitFor((m) => m.id === 8, "cancelled test response", 10_000);
       assert.equal(cancelResp.error?.code, -32800);
       assert.equal(
-        peer.allReceived.some((m) => m.method === "lithe/log" && m.params?.operationId === "op-discover-cancel"),
+        peer.allReceived.some((m) => m.method === "lithe/log" && m.params?.operationId === "op-test-cancel"),
         false,
         "Cancelled requests must NOT emit operationFinished or operationFailed logs",
       );

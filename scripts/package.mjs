@@ -30,6 +30,7 @@ import {
   extractWheelSubtree,
   writeDeterministicZip,
 } from "./lib/archive.mjs";
+import { backendPath, buildBackend, dependencyNotices } from "./lib/backend.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 export const PACKAGE_ID = "io.github.lithe-idea.python-support";
@@ -54,6 +55,7 @@ export function manifestForPlatform(baseManifest, platform, lock) {
   }
   const clone = structuredClone(baseManifest);
   const isWindows = platform.startsWith("windows-");
+  clone.backend.launch.path = backendPath(platform);
 
   for (const server of clone.languageServers ?? []) {
     if (server.languageID === "python" && server.launch?.kind === "packaged") {
@@ -174,6 +176,7 @@ export async function packagePlatforms({ platforms, expectTag, cleanDist = false
     expectedSha256: tomliSpec.sha256,
   });
 
+  const notices = dependencyNotices(ROOT);
   const built = [];
   for (const platform of selectedPlatforms) {
     const pyreflySpec = lock.pyrefly.platforms[platform];
@@ -211,6 +214,13 @@ export async function packagePlatforms({ platforms, expectTag, cleanDist = false
     writeFileSync(pyreflyDest, pyreflyBytes);
     chmodSync(pyreflyDest, 0o755);
 
+    const backendDest = join(stagePackageDir, backendPath(platform));
+    copyFileSync(buildBackend(ROOT, platform), backendDest);
+    chmodSync(backendDest, 0o755);
+    const noticesDest = join(stagePackageDir, "RUST-THIRD-PARTY-NOTICES.txt");
+    writeFileSync(noticesDest, notices, "utf8");
+    chmodSync(noticesDest, 0o644);
+
     // Extract debugpy and tomli into vendor/.
     const vendorDir = join(stagePackageDir, "vendor");
     extractWheelSubtree(debugpyWheel, "debugpy", vendorDir);
@@ -219,7 +229,7 @@ export async function packagePlatforms({ platforms, expectTag, cleanDist = false
     const relZipPath = `dist/${ASSET_PREFIX}-${baseManifest.version}-${platform}.zip`;
     const absZipPath = resolve(ROOT, relZipPath);
     rmSync(absZipPath, { force: true });
-    writeDeterministicZip(stagePlatformRoot, PACKAGE_ID, absZipPath);
+    writeDeterministicZip(stagePlatformRoot, PACKAGE_ID, absZipPath, [pyreflySpec.packagePath, backendPath(platform)]);
 
     const sha256 = sha256File(absZipPath);
     built.push({ platform, relZipPath, absZipPath, sha256 });
