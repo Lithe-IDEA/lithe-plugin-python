@@ -21,6 +21,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Verify release tag checks
+        run: node --test --test-timeout=30000 scripts/ci/release/publish.test.mjs
       - uses: actions/download-artifact@v4
         with:
           pattern: python-support-archive-*

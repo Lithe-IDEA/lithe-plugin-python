@@ -4,13 +4,19 @@ Python language support plugin for Lithe (`schemaVersion: 0`, `pluginAPIVersion:
 
 遵循 Lithe 插件契约 v1（`schemaVersion: 0`），为 Lithe 桌面端（macOS / Windows / Linux）提供开箱即用的 Python 语言支持、宿主工具链驱动的 `Pyrefly` 解释器注入、`.venv` / `.conda` / `conda` / `uv` / `pyenv` 多来源环境发现、动态 `pytest` 测试树收集与执行、`uv` / `conda` / `Ruff` 构建任务、源码级断点调试及新建项目向导。跨平台实现与验证记录详见 [docs/feature-matrix.md](docs/feature-matrix.md)。
 
+## 兼容性（Compatibility）
+
+Python Support v1.0.0 要求 Lithe 0.8.9 或更新版本。Lithe 0.8.9 支持安装插件并处理 `.py`、`.pyi` 和 `.pyw` 文件。Lithe 0.8.10 起还能按 shebang 识别无后缀 Python 脚本。
+
+Python Support v1.0.0 requires Lithe 0.8.9 or later. Lithe 0.8.9 can install the plugin and work with `.py`, `.pyi`, and `.pyw` files. Lithe 0.8.10 and later also recognize extensionless Python scripts by their shebang.
+
 ---
 
 ## 核心能力（Capabilities）
 
 1. **语言与编辑器基础（`languages: python`）**
    - 识别 `.py`、`.pyi`、`.pyw`，配置 `#` 行注释与括号/引号自动配对，声明 `pyproject.toml` / `setup.py` / `setup.cfg` / `requirements.txt` / `Pipfile` / `pyrefly.toml` 项目标记及 `.venv` / `venv` / `.conda` 项目依赖目录。
-   - Lithe 0.8.9 可以安装此插件。支持 TextMate 首行匹配的桌面版本还会按 shebang 识别无后缀脚本，提供 Python 高亮和 Pyrefly 诊断。
+   - 按 shebang 识别的无后缀脚本同样支持 Python 高亮、注释和 Pyrefly 诊断。
 2. **后端解析的语言服务器启动与解释器自动注入（`backend` + `languageServers: python` / Pyrefly `1.4.1`）**
    - 插件包内的 Rust 后端直接启动 Pyrefly，无需先找到 Python。宿主会传入可用于自动启动的解释器路径，缺失时由 Pyrefly 按自身规则发现项目环境。构建、测试与调试仍用宿主选择的 Python。
    - 构建期按平台固定版本与 SHA-256 打包 `pyrefly 1.4.1`（Unix：`bin/pyrefly`，Windows：`bin/pyrefly.exe`），每个包也包含同一目标架构的 `bin/lithe-python-backend`（Windows 为 `.exe`）。
