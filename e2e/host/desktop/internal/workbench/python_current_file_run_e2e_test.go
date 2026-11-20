@@ -53,6 +53,10 @@ func checkPythonCurrentFileRun(t *testing.T, override bool) {
 	}
 	kernel := core.NewClient()
 	preferences := store.At(t.TempDir())
+	// A headless test has no AppKit event loop to query the system appearance.
+	if err := preferences.Save(settingsFile, settings{Theme: themeDark}); err != nil {
+		t.Fatal(err)
+	}
 	// The toolchain resolver reads persisted trust before probing a project .venv.
 	trust, err := toolchain.ReadWorkspaceTrust(ctx, kernel, preferences.Dir(), root)
 	if err != nil {
