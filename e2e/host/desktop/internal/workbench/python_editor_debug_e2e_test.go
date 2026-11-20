@@ -76,7 +76,7 @@ Path('interpreter.txt').write_text(sys.prefix, encoding='utf-8')
 		if failure := h.app.pluginServerFailed["python"]; failure != nil {
 			t.Fatalf("Pyrefly start: %s", failure.message)
 		}
-		return problemMessagesContain(h.app, "`ProjectInterpreterType` is not assignable to `int`")
+		return pythonDiagnosticMessage(h.app, source, "`ProjectInterpreterType` is not assignable to `int`") != ""
 	})
 	t.Logf("Pyrefly reported %q for the open editor document", problemMessages(h.app))
 	h.app.startDebug(p)

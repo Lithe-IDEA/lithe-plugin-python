@@ -111,7 +111,9 @@ jobs:
         with:
           name: python-support-archive-darwin-arm64
           path: dist
+      - name: Install pytest for the host suite
+        run: python -m pip install --disable-pip-version-check pytest
       - name: Verify Python highlighting on Lithe 0.8.9
         run: node scripts/e2e-host.mjs --ref 4d1b88f03f243356c855299464baa2647cc57226 --run '^TestPythonSupportPluginGrammarHighlighting$'
-      - name: Verify highlighting and shebang diagnostics on the pinned desktop
-        run: node scripts/e2e-host.mjs --run '^TestPythonSupportPlugin(GrammarHighlighting|Shebang)$'
+      - name: Run the full Python host suite on the pinned desktop
+        run: PYTEST_PYTHON="$(command -v python)" node scripts/e2e-host.mjs

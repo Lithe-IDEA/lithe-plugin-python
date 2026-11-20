@@ -35,6 +35,22 @@ import (
 
 const pythonSupportPluginID = "io.github.lithe-idea.python-support"
 
+// Require all parts of the message on one diagnostic from this plugin and file.
+func pythonDiagnosticMessage(a *App, path string, parts ...string) string {
+	set := a.pluginDiagnostics[pythonSupportPluginID]
+	if set == nil {
+		return ""
+	}
+	for _, record := range set.All() {
+		if record.FileKey == path && !slices.ContainsFunc(parts, func(part string) bool {
+			return !strings.Contains(record.Message, part)
+		}) {
+			return record.Message
+		}
+	}
+	return ""
+}
+
 func pythonPackageDigest(t *testing.T, root string) map[string]string {
 	t.Helper()
 	digest := map[string]string{}

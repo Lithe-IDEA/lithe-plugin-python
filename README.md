@@ -114,7 +114,7 @@ node --test --test-timeout=60000 scripts/package/*.test.mjs
 cargo test --locked --manifest-path backend/Cargo.toml
 node scripts/test.mjs
 
-# 使用 e2e/host/lithe-host.json 固定的兼容桌面提交
+# 使用 e2e/host/lithe-host.json 固定的桌面主线提交运行完整宿主套件
 node scripts/e2e-host.mjs
 
 # 用同一个 ZIP 检查 0.8.9 能安装插件并正常高亮 .py

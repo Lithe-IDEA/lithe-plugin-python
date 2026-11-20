@@ -31,13 +31,17 @@ func openPythonGrammarWorkbench(t *testing.T) *harness {
 	if err := os.WriteFile(filepath.Join(preferences.Dir(), settingsFile), []byte(`{"theme":"dark"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := newHarnessWithOptions(t, Options{
 		Kernel: kernel, PluginKernel: kernel, PluginRoot: service.Root, Store: preferences, Languages: []string{"en"},
 		Logs: &pluginFilesLog{directory: t.TempDir()}, LogKernel: kernel,
 	})
 	h.app.reloadPluginLanguages()
 	h.settle()
-	h.open(t.TempDir())
+	h.open(workspace)
 	return h
 }
 
@@ -117,7 +121,6 @@ func TestPythonSupportPluginShebang(t *testing.T) {
 		t.Fatal("extensionless script edit was not applied")
 	}
 	awaitStateWithin(t, h, 15*time.Second, "Pyrefly to diagnose the edited extensionless script", func() bool {
-		return diagnosticsForFile(h.app, path) > 0 &&
-			problemMessagesContain(h.app, "int") && problemMessagesContain(h.app, "bad")
+		return pythonDiagnosticMessage(h.app, path, "bad", "`int`") != ""
 	})
 }
