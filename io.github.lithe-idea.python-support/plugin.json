@@ -503,6 +503,7 @@
           "runtimeArguments": ["-I", "-B"],
           "entry": "scripts/build_provider.py"
         },
+        "initializationOptions": { "pythonExecutable": "${setting:pythonExecutable}" },
         "executesProjectCode": true,
         "mayUseNetwork": false
       },

@@ -101,6 +101,7 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
       `${PACKAGE_ID}/scripts/windows_job.py`,
       `${PACKAGE_ID}/scripts/build_model.py`,
       `${PACKAGE_ID}/scripts/build_provider.py`,
+      `${PACKAGE_ID}/scripts/run_entrypoint.py`,
       `${PACKAGE_ID}/scripts/discover_tests.py`,
       `${PACKAGE_ID}/scripts/debugpy_adapter.py`,
       `${PACKAGE_ID}/vendor/debugpy/adapter/__main__.py`,

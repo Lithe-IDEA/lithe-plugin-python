@@ -1626,9 +1626,37 @@ try {
       assert.equal(moduleLaunch.result.workingDirectory, "tests");
       assert.equal(run(pythonCmd, moduleLaunch.result.arguments, { cwd: join(wsDir, "tests") }).trim(), "from src option fallback");
 
+      const shadowed = join(wsDir, "shadowed_package");
+      mkdirSync(shadowed);
+      writeFileSync(join(shadowed, "__main__.py"), "print('selected namespace entrypoint')\n");
+      const shadowedLaunch = await prepareRun(75, {
+        entrypoint: "module:shadowed_package/__main__.py", runtimeArguments: ["-B"],
+      });
+      assert.equal(run(pythonCmd, shadowedLaunch.result.arguments, { cwd: wsDir }).trim(), "selected namespace entrypoint");
+      writeFileSync(join(wsDir, "shadowed_package.py"), "print('wrong source ran')\n");
+      const collision = spawnSync(pythonCmd, shadowedLaunch.result.arguments, {
+        cwd: wsDir, encoding: "utf8", timeout: 5000, windowsHide: true,
+        env: { ...process.env, ...shadowedLaunch.result.environment },
+      });
+      assert.ifError(collision.error);
+      assert.equal(collision.stdout, "", "a shadowed entrypoint must not start a different file");
+      assert.equal(collision.status, 1);
+      assert.match(collision.stderr, /当前包入口被同名模块或包遮蔽/);
+
+      const launcher = join(unpackedPluginDir, "scripts", "run_entrypoint.py");
+      const interpreter = run(pythonCmd, ["-c", "import sys; print(sys.executable)"]).trim();
+      const forwarded = spawnSync(pythonCmd, ["-I", "-B", launcher, "interpreter", interpreter,
+        "-c", "import sys; print(sys.argv[1]); sys.exit(17)", "argument with spaces"], {
+        cwd: wsDir, encoding: "utf8", timeout: 5000, windowsHide: true,
+      });
+      assert.ifError(forwarded.error);
+      assert.equal(forwarded.status, 17, forwarded.stderr);
+      assert.equal(forwarded.stdout.trim(), "argument with spaces");
+
       for (const [id, entrypoint] of [[73, "script:../worker.py"], [74, "script:missing.py"]]) {
         const response = await prepareRun(id, { entrypoint });
         assert.equal(response.error?.code, -32000);
+        assert.match(response.error.message, /保存的 Python 入口已失效/);
         assert.ok(peer.allReceived.some((m) => m.method === "lithe/log"
           && m.params?.operationId === `op-prepare-run-${id}` && m.params?.code === "python.staleRunEntrypoint"));
       }

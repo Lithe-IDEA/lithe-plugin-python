@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,15 @@ import (
 )
 
 func TestPythonSupportPluginRunCurrentFile(t *testing.T) {
+	checkPythonCurrentFileRun(t, false)
+}
+
+func TestPythonSupportPluginRunCurrentFileInterpreterOverride(t *testing.T) {
+	checkPythonCurrentFileRun(t, true)
+}
+
+func checkPythonCurrentFileRun(t *testing.T, override bool) {
+	t.Helper()
 	archive := pythonArchiveForE2E(t)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
@@ -51,6 +61,30 @@ func TestPythonSupportPluginRunCurrentFile(t *testing.T) {
 	if _, err := trust.Save(ctx, kernel, true, false); err != nil {
 		t.Fatal(err)
 	}
+	wantVenv := venv
+	if override {
+		overrideDir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantVenv = filepath.Join(overrideDir, "configured interpreter")
+		if output, err := exec.CommandContext(ctx, python, "-m", "venv", "--without-pip", wantVenv).CombinedOutput(); err != nil {
+			t.Fatalf("create configured environment: %v\n%s", err, output)
+		}
+		configured := filepath.Join(wantVenv, "bin", "python")
+		if runtime.GOOS == "windows" {
+			configured = filepath.Join(wantVenv, "Scripts", "python.exe")
+		}
+		settings, err := json.Marshal(map[string]map[string]string{
+			pythonSupportPluginID: {"pythonExecutable": configured},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(preferences.Dir(), "plugin-settings.json"), settings, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	h := newHarnessWithOptions(t, Options{
 		Kernel: kernel, PluginKernel: kernel, PluginRoot: t.TempDir(), Store: preferences,
 		Languages: []string{"en"},
@@ -79,8 +113,8 @@ func TestPythonSupportPluginRunCurrentFile(t *testing.T) {
 	run := awaitProcessRun(t, h, p, "main.py", nil)
 	checkOutput := func(output string) {
 		t.Helper()
-		if !strings.Contains(output, "current file ran") || !strings.Contains(output, venv) {
-			t.Fatalf("expected the program to run using the project's environment %q:\n%s", venv, output)
+		if !strings.Contains(output, "current file ran") || !strings.Contains(output, wantVenv) {
+			t.Fatalf("expected the program to use Python environment %q:\n%s", wantVenv, output)
 		}
 	}
 	checkOutput(run.output.all())

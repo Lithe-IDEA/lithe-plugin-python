@@ -31,7 +31,8 @@ Python Support v1.0.0 requires Lithe 0.8.9 or later. Lithe 0.8.9 can install the
    - Python 构建提供者 `scripts/build_provider.py` 使用 `python -I -B` 启动，处理以下请求。
      - `lithe/build/model`：复用 `scripts/build_model.py` 纯 `ast` + `tomllib`（Python 3.9–3.10 自动回退内置 `vendor/tomli`）静态提取 `[project.scripts]`、包 `__main__.py`、顶层 `__main__` 脚本、Django `manage.py`、FastAPI ASGI、Flask WSGI 运行目标（绝不执行用户代码），派生 7 类声明式 `run` 配置；
      - `lithe/build/test`：通过 pytest node ID 精确运行套件或单个用例，也接受 JUnit XML 类名。指定用例时须同时给出套件。运行时推送 `lithe/build/progress`，并产出 `.pytest_cache/lithe-junit.xml` 供 Core 解码。构建请求在排队时即可取消，执行进程的所有权随请求结束。macOS 和 Linux 使用 POSIX 进程组，Windows 使用 Job Object。
-     - 顶部「当前文件 → 运行」支持带 `__main__` 入口的脚本和包内 `__main__.py`。`lithe/build/runEntrypoints` 静态发现入口，`lithe/build/prepareRun` 返回启动计划，由宿主用项目选定的 Python 运行。
+     - 顶部「当前文件 → 运行」支持带 `__main__` 入口的脚本和包内 `__main__.py`。`lithe/build/runEntrypoints` 静态发现入口，`lithe/build/prepareRun` 返回启动计划。默认使用项目选定的 Python；指定「Python 解释器覆盖」时，使用宿主解析的显式解释器。
+     - `scripts/run_entrypoint.py` 随插件 ZIP 安装，运行时只读。它在宿主管理的进程树内转发解释器覆盖，并检查包入口的实际来源。包名被其他模块遮蔽时给出错误。旧宿主未传界面语言时，入口错误同时提供中英文。
      - 同时保留声明式任务 `pip install -r requirements.txt` 与 `mypy`（带诊断 `lineMatcher`）。
    - `uv`（`uv.lock`）：`uv sync`、`uv lock`。
    - `conda`（`environment.yml` / `environment.yaml`）：`conda env update --file environment.yml --prune`。
@@ -62,7 +63,7 @@ Rust SDK 和构建提供者的 `scripts/lithe_rpc.py` 通过 stdio JSON-RPC 2.0 
 | `lithe/build/model` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "pyproject_parse_failed"`，`count: 1`）<br>恢复：`plugins.operation.recovery_finished`（`code: "pyproject_restored"`，`count: 1`） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `pyproject_parse_failed`、`pyproject_restored`、`python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
 | `lithe/build/test` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`；测试断言失败仍属正常协议返回 `exitCode != 0`，失效/越界选择器、进程级超时或解释器缺失才记 `ERROR`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidTestSelector`、`python.staleTestSelector`、`python.pytestTimedOut`、`python.interpreterUnavailable`、`python.projectUnavailable`、`internal_error` |
 | `lithe/build/runEntrypoints` | `build_provider.py` | **已启用 `suppressSuccessDiagnostics`**（打开文件高频静态入口探测成功不发 `INFO`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
-| `lithe/build/prepareRun` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidRunEntrypoint`、`python.staleRunEntrypoint`、`python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
+| `lithe/build/prepareRun` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidRunEntrypoint`、`python.staleRunEntrypoint`、`python.interpreterUnavailable`、`python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
 | `notification` / `result-encoding` / `shutdown` | `lithe_rpc.py` | — | — | `plugins.operation.failed`（`ERROR`） | `framing_error`、`result_encoding_failed`、`internal_error` |
 
 `toolchains/query` 是高频只读操作，成功由 SDK 返回事实。取消、读取失败、扫描超限与不安全输入通过 `plugin.toolchain.*` 结构化返回。宿主工具链层观察并处理查询及解码失败。协议 v0 的 SDK 无该操作的诊断回调。
