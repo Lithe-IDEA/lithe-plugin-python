@@ -1,0 +1,9 @@
+{
+  "scopeName": "source.python.lithe-support",
+  "firstLineMatch": "^#![ \\t]*(?:/(?:[^ \\t]*/)?env[ \\t]+(?:-S[ \\t]+)?|/(?:[^ \\t]*/)?)(?:python(?:[0-9]+(?:\\.[0-9]+)*t?)?|pypy[0-9]*)(?:[ \\t]|$)",
+  "patterns": [
+    {
+      "include": "source.python"
+    }
+  ]
+}

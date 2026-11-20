@@ -9,7 +9,8 @@ Python language support plugin for Lithe (`schemaVersion: 0`, `pluginAPIVersion:
 ## 核心能力（Capabilities）
 
 1. **语言与编辑器基础（`languages: python`）**
-   - 识别 `.py`、`.pyi`、`.pyw`，以及首行指定 Python 解释器的无后缀脚本（需要宿主支持 `languages: 1`），配置 `#` 行注释与括号/引号自动配对，声明 `pyproject.toml` / `setup.py` / `setup.cfg` / `requirements.txt` / `Pipfile` / `pyrefly.toml` 项目标记及 `.venv` / `venv` / `.conda` 项目依赖目录。
+   - 识别 `.py`、`.pyi`、`.pyw`，配置 `#` 行注释与括号/引号自动配对，声明 `pyproject.toml` / `setup.py` / `setup.cfg` / `requirements.txt` / `Pipfile` / `pyrefly.toml` 项目标记及 `.venv` / `venv` / `.conda` 项目依赖目录。
+   - Lithe 0.8.9 可以安装此插件。支持 TextMate 首行匹配的桌面版本还会按 shebang 识别无后缀脚本，提供 Python 高亮和 Pyrefly 诊断。
 2. **后端解析的语言服务器启动与解释器自动注入（`backend` + `languageServers: python` / Pyrefly `1.4.1`）**
    - 插件包内的 Rust 后端直接启动 Pyrefly，无需先找到 Python。宿主会传入可用于自动启动的解释器路径，缺失时由 Pyrefly 按自身规则发现项目环境。构建、测试与调试仍用宿主选择的 Python。
    - 构建期按平台固定版本与 SHA-256 打包 `pyrefly 1.4.1`（Unix：`bin/pyrefly`，Windows：`bin/pyrefly.exe`），每个包也包含同一目标架构的 `bin/lithe-python-backend`（Windows 为 `.exe`）。
@@ -90,6 +91,7 @@ Rust SDK 和构建提供者的 `scripts/lithe_rpc.py` 通过 stdio JSON-RPC 2.0 
 | `backend/target/` | Rust 后端编译输出，包含按平台目标区分的产物 | 随工作树保留，可重新由 Cargo 生成 | 不共享，构建时由固定的 Cargo.lock 和 Rust 目标重建。Cargo 使用全局 registry 与 Git 依赖下载缓存。 |
 | `.artifacts/stage/` | 打包过程中的单平台解包暂存目录 | 每次 `scripts/package.mjs` 按平台重建（`.gitignore` 忽略） | **不可复用**（构建中间产物，毫秒级重建） |
 | `.artifacts/lithe-host/` | `scripts/e2e-host.mjs` 检出的宿主稀疏工作树及其编译产物 | 本地按需保留（`.gitignore` 忽略） | 其内部 `.artifacts/desktop` 在同一操作系统、CPU 架构与相同 `PINNED_CORE_REVISION` 前提下可按宿主规则复制加速，不得跨工作树软链共用；任何运行时会话日志目录（`sessions/<session>/plugins/.../files/`）与状态目录严禁跨工作树复制 |
+| `grammars/python.tmLanguage.json`（插件包内） | 插件版本拥有的 TextMate 首行规则，复用宿主内置的 `source.python` 高亮规则 | 构建时随 ZIP 打包，运行时只读，随插件版本更新或卸载 | 由插件源码随包生成，无运行时缓存 |
 | `dist/` | 最终产出的 `python-support-<version>-<platform>.zip` 发布包 | 打包输出（`.gitignore` 忽略） | 按需重新运行 `node scripts/package.mjs` 生成 |
 
 ### 常用命令
@@ -114,6 +116,9 @@ node scripts/test.mjs
 
 # 使用 e2e/host/lithe-host.json 固定的兼容桌面提交
 node scripts/e2e-host.mjs
+
+# 用同一个 ZIP 检查 0.8.9 能安装插件并正常高亮 .py
+node scripts/e2e-host.mjs --source https://github.com/1lck/Lithe-IDEA.git --ref desktop-v0.8.9 --run '^TestPythonSupportPluginGrammarHighlighting$'
 
 # 也可使用另一个兼容的本地检出和提交
 node scripts/e2e-host.mjs --source /path/to/Lithe-IDEA --ref COMPATIBLE_HOST_COMMIT

@@ -310,6 +310,27 @@ try {
   const pluginManifest = JSON.parse(readFileSync(join(unpackedPluginDir, "plugin.json"), "utf8"));
 
   await check("Unix and Windows plugin.json + zh-Hans.json satisfy M3 contract invariants", () => {
+    const grammar = JSON.parse(readFileSync(join(unpackedPluginDir, "grammars", "python.tmLanguage.json"), "utf8"));
+    assert.deepEqual(grammar.patterns, [{ include: "source.python" }]);
+    const firstLine = new RegExp(grammar.firstLineMatch);
+    for (const line of [
+      "#!/usr/bin/python",
+      "#!/usr/bin/env python3",
+      "#!/usr/bin/env -S python3.13 -I",
+      "#!/opt/venv/bin/python3.13t",
+      "#!/usr/bin/env pypy3",
+    ]) {
+      assert.match(line, firstLine);
+    }
+    for (const line of [
+      "#!/usr/bin/env bash",
+      "#!/usr/bin/env python-wrapper",
+      "#!/usr/bin/python3.13.exe",
+      "#!/usr/bin/env node python3",
+      "# Mention #!/usr/bin/env python3",
+    ]) {
+      assert.doesNotMatch(line, firstLine);
+    }
     for (const platform of Object.keys(lock.pyrefly.platforms)) {
       const variant = manifestForPlatform(sourceManifest, platform, lock);
       assert.equal(variant.schemaVersion, 0);
@@ -345,7 +366,7 @@ try {
         "toolchainProviders",
       ]);
       for (const [capability, version] of Object.entries(variant.requires)) {
-        assert.equal(version, ["buildSystems", "languages"].includes(capability) ? 1 : 0);
+        assert.equal(version, capability === "buildSystems" ? 1 : 0);
       }
       assert.deepEqual([...variant.permissions].sort(), [
         "backend.launch",
@@ -362,25 +383,8 @@ try {
       });
 
       const pyLang = variant.languages[0];
-      const firstLine = new RegExp(pyLang.firstLineMatch);
-      for (const line of [
-        "#!/usr/bin/python",
-        "#!/usr/bin/env python3",
-        "#!/usr/bin/env -S python3.13 -I",
-        "#!/opt/venv/bin/python3.13t",
-        "#!/usr/bin/env pypy3",
-      ]) {
-        assert.match(line, firstLine);
-      }
-      for (const line of [
-        "#!/usr/bin/env bash",
-        "#!/usr/bin/env python-wrapper",
-        "#!/usr/bin/python3.13.exe",
-        "#!/usr/bin/env node python3",
-        "# Mention #!/usr/bin/env python3",
-      ]) {
-        assert.doesNotMatch(line, firstLine);
-      }
+      assert.deepEqual(pyLang.grammar, { kind: "textmate", path: "grammars/python.tmLanguage.json" });
+      assert.equal("firstLineMatch" in pyLang, false);
       assert.deepEqual(pyLang.fileExtensions, ["py", "pyi", "pyw"]);
       assert.deepEqual(pyLang.dependencies.projectDependencyPaths, [".venv", "venv", ".conda"]);
 

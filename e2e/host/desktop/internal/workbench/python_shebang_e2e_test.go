@@ -9,12 +9,15 @@ import (
 	"time"
 
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/editor/rope"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/editor/syntax"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginservice"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/store"
 	"github.com/vivaui/viva/app"
 )
 
-func TestPythonSupportPluginShebang(t *testing.T) {
+func openPythonGrammarWorkbench(t *testing.T) *harness {
+	t.Helper()
 	archive := pythonArchiveForE2E(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -34,8 +37,66 @@ func TestPythonSupportPluginShebang(t *testing.T) {
 	})
 	h.app.reloadPluginLanguages()
 	h.settle()
-	root := t.TempDir()
-	h.open(root)
+	h.open(t.TempDir())
+	return h
+}
+
+func TestPythonSupportPluginGrammarHighlighting(t *testing.T) {
+	h := openPythonGrammarWorkbench(t)
+	p := h.app.project
+	path := filepath.Join(p.root, "sample.py")
+	const body = `class Counter:
+    def greet(self, name: str):
+        count = 42 + 1
+        if count >= 1 and name:
+            return f"Hi {name.upper()}, {count + 1}"  # hello
+        return None
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	grammar := h.app.syntaxRegistry().SyntaxForPath(path)
+	if grammar == nil || grammar.Language().Scope != "source.python.lithe-support" {
+		t.Fatal("installed Python grammar was not loaded")
+	}
+	h.app.openFile(p, path)
+	h.settle()
+	doc := p.docs.byPath(path)
+	if doc == nil || doc.languageID != "python" {
+		t.Fatal("sample.py did not open as Python")
+	}
+
+	bundled := syntax.NewRegistry().SyntaxForPath(path)
+	highlighter := syntax.NewHighlighter(bundled, rope.New([]byte(body)), syntax.HighlighterOptions{})
+	t.Cleanup(highlighter.Close)
+	for lineIndex, line := range strings.Split(body, "\n") {
+		want := highlighter.Line(nil, lineIndex)
+		got := doc.view.SyntaxLine(nil, lineIndex)
+		if len(got) != len(want) {
+			t.Fatalf("line %d %q highlights = %v, bundled Python = %v", lineIndex+1, line, got, want)
+		}
+		for i, token := range got {
+			if token == want[i] {
+				continue
+			}
+			end := len(line)
+			if i+1 < len(want) {
+				end = int(want[i+1].Start)
+			}
+			// Both registries tokenize operators through the bundled grammar. The
+			// plugin root uses the generic classifier, styling those symbols as keywords.
+			if token.Start == want[i].Start && token.Name.String() == "keyword" &&
+				want[i].Name.String() == "delimiter" &&
+				strings.Trim(line[token.Start:end], "=+<>") == "" {
+				continue
+			}
+			t.Errorf("line %d %q token = %v, bundled Python = %v", lineIndex+1, line, token, want[i])
+		}
+	}
+}
+
+func TestPythonSupportPluginShebang(t *testing.T) {
+	h := openPythonGrammarWorkbench(t)
 	p := h.app.project
 	path := filepath.Join(p.root, "script")
 	const body = "#!/usr/bin/env -S python3 -I\ncount: int = 42\n"

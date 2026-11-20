@@ -16,7 +16,7 @@
     "buildSystems": 1,
     "debugAdapters": 0,
     "languageServers": 0,
-    "languages": 1,
+    "languages": 0,
     "outputLinkMatchers": 0,
     "projectGenerators": 0,
     "settings": 0,
@@ -52,7 +52,10 @@
       "id": "python",
       "displayName": "Python",
       "fileExtensions": ["py", "pyi", "pyw"],
-      "firstLineMatch": "^#![ \\t]*(?:/(?:[^ \\t]*/)?env[ \\t]+(?:-S[ \\t]+)?|/(?:[^ \\t]*/)?)(?:python(?:[0-9]+(?:\\.[0-9]+)*t?)?|pypy[0-9]*)(?:[ \\t]|$)",
+      "grammar": {
+        "kind": "textmate",
+        "path": "grammars/python.tmLanguage.json"
+      },
       "projectFileNames": [
         "pyproject.toml",
         "setup.py",

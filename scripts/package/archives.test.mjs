@@ -121,6 +121,15 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
     assert.deepEqual(manifest.requires, baseManifest.requires);
     assert.deepEqual(manifest.vendor, baseManifest.vendor);
 
+    assert.equal(manifest.requires.languages, 0);
+    const pythonLanguage = manifest.languages.find(({ id }) => id === "python");
+    assert.deepEqual(pythonLanguage.grammar, { kind: "textmate", path: "grammars/python.tmLanguage.json" });
+    assert.equal("firstLineMatch" in pythonLanguage, false);
+    const grammarPath = `${PACKAGE_ID}/${pythonLanguage.grammar.path}`;
+    const grammarEntry = entries.find(({ name }) => name === grammarPath);
+    assert.ok(grammarEntry, `${archive.name}: missing declared grammar ${grammarPath}`);
+    assert.deepEqual(grammarEntry.data, readFileSync(grammarPath));
+
     assert.deepEqual(manifest.backend, { launch: { kind: "packaged", path: backendPath(archive.platform) } });
     assert.deepEqual(manifest.toolchainProviders, baseManifest.toolchainProviders);
     assert.equal(manifest.requires.toolchainProviders, 0);
