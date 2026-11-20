@@ -121,6 +121,20 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
     assert.deepEqual(manifest.requires, baseManifest.requires);
     assert.deepEqual(manifest.vendor, baseManifest.vendor);
 
+    assert.equal(manifest.requires.languages, 0);
+    const pythonLanguage = manifest.languages.find(({ id }) => id === "python");
+    assert.equal(pythonLanguage.grammar, undefined);
+    assert.equal("firstLineMatch" in pythonLanguage, false);
+    const metadataPath = `${PACKAGE_ID}/grammars/python.first-line.json`;
+    const metadataEntry = entries.find(({ name }) => name === metadataPath);
+    assert.ok(metadataEntry, `${archive.name}: missing ${metadataPath}`);
+    // Packaged JSON can have CRLF when a Windows runner assembles the ZIP.
+    assert.deepEqual(
+      JSON.parse(metadataEntry.data.toString("utf8")),
+      JSON.parse(readFileSync(metadataPath, "utf8")),
+      `${archive.name}: packaged metadata differs from ${metadataPath}`,
+    );
+
     assert.deepEqual(manifest.backend, { launch: { kind: "packaged", path: backendPath(archive.platform) } });
     assert.deepEqual(manifest.toolchainProviders, baseManifest.toolchainProviders);
     assert.equal(manifest.requires.toolchainProviders, 0);

@@ -12,7 +12,8 @@
 
 | 能力域 | 功能项 | `darwin-arm64` | `darwin-x64` | `windows-x64` / `windows-arm64` | `linux-x64` / `linux-arm64` | 最近实机验证 | 实现与测试证据路径（本仓库） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 语言基础 (`languages`) | `.py` / `.pyi` / `.pyw` 识别、`#` 行注释、括号/引号配对、项目标记与 `.venv` / `venv` / `.conda` 依赖目录 | ✅ 已验证 | ⏳ pending（归档与清单已校验） | ⏳ pending（归档与 Windows 清单已校验） | ⏳ pending（归档与清单已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/plugin.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
+| 语言基础 (`languages`) | `.py` / `.pyi` / `.pyw` 识别、`#` 行注释、括号/引号配对、项目标记与 `.venv` / `venv` / `.conda` 依赖目录 | ✅ 已验证 | ⏳ pending（归档与清单已校验） | ⏳ pending（归档与 Windows 清单已校验） | ⏳ pending（归档与清单已校验） | `2026-11-20`（`darwin-arm64`，0.8.9 复验 `.py` 高亮） | `io.github.lithe-idea.python-support/plugin.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go`<br>`e2e/host/desktop/internal/workbench/python_shebang_e2e_test.go` |
+| 无后缀 Python 脚本 | 支持 TextMate 首行匹配的桌面按解释器路径或 `env` shebang 打开，提供 Python 高亮、注释与 Pyrefly 诊断 | ✅ 已验证 | ⏳ 待实机验证 | ⏳ 待实机验证 | ⏳ 待实机验证 | `2026-11-20`（`darwin-arm64`，桌面 `3dd5a79e9`） | `io.github.lithe-idea.python-support/grammars/python.first-line.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_shebang_e2e_test.go` |
 | 插件后端与语言服务器启动解析 (`backend` + `languageServers`) | 包内 Rust SDK 后端协商 `litheLogging` 0 与 `litheFunctions` 0。解析 `pyrefly lsp` 启动，传入宿主提供的解释器，缺失时使用 Pyrefly 原生检测。 | ✅ 已验证（桌面主线） | ⏳ 归档已校验 | ⏳ 待 CI 与宿主验收 | ⏳ 待 CI 与宿主验收 | 2026-11-20（macOS ARM64，桌面主线） | `backend/src/pyrefly.rs`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go`<br>`e2e/host/desktop/internal/workbench/python_editor_debug_e2e_test.go` |
 | 工具链与环境自动发现 (`toolDefinitions`) | `python` 4 层解析：项目绑定 → `.venv` / `venv` / `.conda`（受工作区信任门控，保留字面软链路径）→ 全局设置 → `VIRTUAL_ENV` + `PATH` → 16 条跨平台自动发现规则（覆盖 `UV_PYTHON_INSTALL_DIR`、`XDG_DATA_HOME`、`PYENV_ROOT`、`CONDA_ENVS_PATH`、`CONDA_PREFIX`、`WORKON_HOME`、`LOCALAPPDATA`、`APPDATA`、Homebrew、Framework、`~/.pyenv`、`~/.local/share/uv`、`*conda*/envs/*`、`miniforge*/envs/*`） | ✅ 已验证 | ⏳ pending（清单与 Core 规则已校验） | ⏳ pending（`Scripts/python.exe` / `python.exe` 布局与环境变量发现规则已通过 Core 校验） | ⏳ pending（清单与 Core 规则已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/plugin.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
 | 构建模型与运行 (`buildSystems: python` + `provider`) | `scripts/build_provider.py`（`python -I -B`，`lithe/build/model`）复用 `scripts/build_model.py` 纯 AST + `tomllib` / `vendor/tomli` 静态提取 `[project.scripts]`、包 `__main__.py`、顶层 `__main__` 脚本、Django `manage.py`、FastAPI ASGI、Flask WSGI 并派生 7 类声明式 `run` 配置；支持损坏 `pyproject.toml` 降级与修复后恢复诊断，并在协商 `litheBuild` 1 时支持 `lithe/build/runEntrypoints` | ✅ 已验证 | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | ⏳ pending（归档已校验） | `2026-11-18`（`darwin-arm64`） | `io.github.lithe-idea.python-support/scripts/build_model.py`<br>`io.github.lithe-idea.python-support/scripts/build_provider.py`<br>`io.github.lithe-idea.python-support/plugin.json`<br>`scripts/test.mjs`<br>`e2e/host/desktop/internal/workbench/python_support_plugin_e2e_test.go` |
@@ -26,8 +27,9 @@
 
 ## 宿主版本与验证
 
-- 插件要求宿主声明 `toolchainProviders: 0` 和 `buildSystems: 1`。桌面稳定版 `desktop-v0.8.8` 缺少这组能力。
-- `e2e/host/lithe-host.json` 固定桌面主线 `761e6f882848d754515ca16c5a78431d85d3b154`（#2192、#2193），其 Core 为 `6a2c0826`。
+- 插件要求宿主声明 `toolchainProviders: 0`、`buildSystems: 1` 和 `languages: 0`。桌面 0.8.9 支持安装与原有 Python 功能。支持 TextMate 首行匹配的桌面会额外识别无后缀脚本。
+- 现有 M3 在兼容桌面主线 `761e6f882`（#2192、#2193）独立验过。`e2e/host/lithe-host.json` 固定支持 TextMate 首行匹配的桌面候选版本。
+- 插件 CI 用同一个 macOS ARM64 ZIP 验证 0.8.9 与候选桌面的普通 Python 高亮，并在候选版验证无后缀脚本编辑后收到 Pyrefly 诊断。
 - macOS ARM64 的工作台测试从 ZIP 安装插件，改变项目版本要求以切换外部解释器，检查全局候选和项目 `.venv` 信任，精确重跑一个参数化 pytest 用例并核对 JUnit。
 - 无头工作台打开 `.py` 后，Pyrefly 返回所选环境独有模块的类型诊断。debugpy 使用同一环境执行当前文件，并将日志写入宿主分配目录。关闭后，已安装插件的文件清单和 SHA-256 与启动前一致。
 - 宿主按 Core 的文件事实校验安装。外部虚拟环境里指向环境外的 Python 链接不可作为提供者候选，项目内环境由宿主信任流程单独处理。
