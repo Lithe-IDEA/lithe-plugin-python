@@ -56,8 +56,8 @@ func TestPythonSupportPluginGrammarHighlighting(t *testing.T) {
 		t.Fatal(err)
 	}
 	grammar := h.app.syntaxRegistry().SyntaxForPath(path)
-	if grammar == nil || grammar.Language().Scope != "source.python.lithe-support" {
-		t.Fatal("installed Python grammar was not loaded")
+	if grammar == nil || grammar.Language().Scope != "source.python" {
+		t.Fatal("installed plugin did not preserve the built-in Python grammar")
 	}
 	h.app.openFile(p, path)
 	h.settle()
@@ -76,21 +76,9 @@ func TestPythonSupportPluginGrammarHighlighting(t *testing.T) {
 			t.Fatalf("line %d %q highlights = %v, bundled Python = %v", lineIndex+1, line, got, want)
 		}
 		for i, token := range got {
-			if token == want[i] {
-				continue
+			if token != want[i] {
+				t.Errorf("line %d %q token = %v, bundled Python = %v", lineIndex+1, line, token, want[i])
 			}
-			end := len(line)
-			if i+1 < len(want) {
-				end = int(want[i+1].Start)
-			}
-			// Both registries tokenize operators through the bundled grammar. The
-			// plugin root uses the generic classifier, styling those symbols as keywords.
-			if token.Start == want[i].Start && token.Name.String() == "keyword" &&
-				want[i].Name.String() == "delimiter" &&
-				strings.Trim(line[token.Start:end], "=+<>") == "" {
-				continue
-			}
-			t.Errorf("line %d %q token = %v, bundled Python = %v", lineIndex+1, line, token, want[i])
 		}
 	}
 }
@@ -99,7 +87,7 @@ func TestPythonSupportPluginShebang(t *testing.T) {
 	h := openPythonGrammarWorkbench(t)
 	p := h.app.project
 	path := filepath.Join(p.root, "script")
-	const body = "#!/usr/bin/env -S python3 -I\ncount: int = 42\n"
+	const body = "#!/usr/bin/env -S /usr/bin/python3 -I\ncount: int = 42\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

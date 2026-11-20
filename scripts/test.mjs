@@ -310,13 +310,14 @@ try {
   const pluginManifest = JSON.parse(readFileSync(join(unpackedPluginDir, "plugin.json"), "utf8"));
 
   await check("Unix and Windows plugin.json + zh-Hans.json satisfy M3 contract invariants", () => {
-    const grammar = JSON.parse(readFileSync(join(unpackedPluginDir, "grammars", "python.tmLanguage.json"), "utf8"));
-    assert.deepEqual(grammar.patterns, [{ include: "source.python" }]);
-    const firstLine = new RegExp(grammar.firstLineMatch);
+    const metadata = JSON.parse(readFileSync(join(unpackedPluginDir, "grammars", "python.first-line.json"), "utf8"));
+    assert.deepEqual(Object.keys(metadata), ["firstLineMatch"]);
+    const firstLine = new RegExp(metadata.firstLineMatch);
     for (const line of [
       "#!/usr/bin/python",
       "#!/usr/bin/env python3",
       "#!/usr/bin/env -S python3.13 -I",
+      "#!/usr/bin/env -S /usr/bin/python3 -I",
       "#!/opt/venv/bin/python3.13t",
       "#!/usr/bin/env pypy3",
     ]) {
@@ -383,7 +384,7 @@ try {
       });
 
       const pyLang = variant.languages[0];
-      assert.deepEqual(pyLang.grammar, { kind: "textmate", path: "grammars/python.tmLanguage.json" });
+      assert.equal(pyLang.grammar, undefined);
       assert.equal("firstLineMatch" in pyLang, false);
       assert.deepEqual(pyLang.fileExtensions, ["py", "pyi", "pyw"]);
       assert.deepEqual(pyLang.dependencies.projectDependencyPaths, [".venv", "venv", ".conda"]);

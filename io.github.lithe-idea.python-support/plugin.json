@@ -52,10 +52,6 @@
       "id": "python",
       "displayName": "Python",
       "fileExtensions": ["py", "pyi", "pyw"],
-      "grammar": {
-        "kind": "textmate",
-        "path": "grammars/python.tmLanguage.json"
-      },
       "projectFileNames": [
         "pyproject.toml",
         "setup.py",

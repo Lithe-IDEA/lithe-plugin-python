@@ -123,16 +123,16 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
 
     assert.equal(manifest.requires.languages, 0);
     const pythonLanguage = manifest.languages.find(({ id }) => id === "python");
-    assert.deepEqual(pythonLanguage.grammar, { kind: "textmate", path: "grammars/python.tmLanguage.json" });
+    assert.equal(pythonLanguage.grammar, undefined);
     assert.equal("firstLineMatch" in pythonLanguage, false);
-    const grammarPath = `${PACKAGE_ID}/${pythonLanguage.grammar.path}`;
-    const grammarEntry = entries.find(({ name }) => name === grammarPath);
-    assert.ok(grammarEntry, `${archive.name}: missing declared grammar ${grammarPath}`);
+    const metadataPath = `${PACKAGE_ID}/grammars/python.first-line.json`;
+    const metadataEntry = entries.find(({ name }) => name === metadataPath);
+    assert.ok(metadataEntry, `${archive.name}: missing ${metadataPath}`);
     // Packaged JSON can have CRLF when a Windows runner assembles the ZIP.
     assert.deepEqual(
-      JSON.parse(grammarEntry.data.toString("utf8")),
-      JSON.parse(readFileSync(grammarPath, "utf8")),
-      `${archive.name}: packaged grammar differs from ${grammarPath}`,
+      JSON.parse(metadataEntry.data.toString("utf8")),
+      JSON.parse(readFileSync(metadataPath, "utf8")),
+      `${archive.name}: packaged metadata differs from ${metadataPath}`,
     );
 
     assert.deepEqual(manifest.backend, { launch: { kind: "packaged", path: backendPath(archive.platform) } });

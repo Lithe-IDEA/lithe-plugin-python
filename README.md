@@ -91,7 +91,7 @@ Rust SDK 和构建提供者的 `scripts/lithe_rpc.py` 通过 stdio JSON-RPC 2.0 
 | `backend/target/` | Rust 后端编译输出，包含按平台目标区分的产物 | 随工作树保留，可重新由 Cargo 生成 | 不共享，构建时由固定的 Cargo.lock 和 Rust 目标重建。Cargo 使用全局 registry 与 Git 依赖下载缓存。 |
 | `.artifacts/stage/` | 打包过程中的单平台解包暂存目录 | 每次 `scripts/package.mjs` 按平台重建（`.gitignore` 忽略） | **不可复用**（构建中间产物，毫秒级重建） |
 | `.artifacts/lithe-host/` | `scripts/e2e-host.mjs` 检出的宿主稀疏工作树及其编译产物 | 本地按需保留（`.gitignore` 忽略） | 其内部 `.artifacts/desktop` 在同一操作系统、CPU 架构与相同 `PINNED_CORE_REVISION` 前提下可按宿主规则复制加速，不得跨工作树软链共用；任何运行时会话日志目录（`sessions/<session>/plugins/.../files/`）与状态目录严禁跨工作树复制 |
-| `grammars/python.tmLanguage.json`（插件包内） | 插件版本拥有的 TextMate 首行规则，复用宿主内置的 `source.python` 高亮规则 | 构建时随 ZIP 打包，运行时只读，随插件版本更新或卸载 | 由插件源码随包生成，无运行时缓存 |
+| `grammars/python.first-line.json`（插件包内） | 插件的 TextMate 首行元数据。普通文件和按首行识别的脚本都沿用宿主的 `source.python` 高亮 | 构建时随 ZIP 打包，运行时只读，随插件版本更新或卸载 | 由插件源码随包生成，无运行时缓存 |
 | `dist/` | 最终产出的 `python-support-<version>-<platform>.zip` 发布包 | 打包输出（`.gitignore` 忽略） | 按需重新运行 `node scripts/package.mjs` 生成 |
 
 ### 常用命令
