@@ -128,7 +128,12 @@ test("every built archive has safe paths, no bytecode or symlinks, and valid pla
     const grammarPath = `${PACKAGE_ID}/${pythonLanguage.grammar.path}`;
     const grammarEntry = entries.find(({ name }) => name === grammarPath);
     assert.ok(grammarEntry, `${archive.name}: missing declared grammar ${grammarPath}`);
-    assert.deepEqual(grammarEntry.data, readFileSync(grammarPath));
+    // Packaged JSON can have CRLF when a Windows runner assembles the ZIP.
+    assert.deepEqual(
+      JSON.parse(grammarEntry.data.toString("utf8")),
+      JSON.parse(readFileSync(grammarPath, "utf8")),
+      `${archive.name}: packaged grammar differs from ${grammarPath}`,
+    );
 
     assert.deepEqual(manifest.backend, { launch: { kind: "packaged", path: backendPath(archive.platform) } });
     assert.deepEqual(manifest.toolchainProviders, baseManifest.toolchainProviders);
