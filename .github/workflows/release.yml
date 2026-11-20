@@ -13,6 +13,9 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      # GitHub only exposes draft releases to callers with push access.
+      contents: write
     outputs:
       exists: ${{ steps.release.outputs.exists }}
     steps:
@@ -21,11 +24,32 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          state=$(gh api graphql \
+            -f query='query($owner: String!, $repo: String!, $tag: String!) {
+              repository(owner: $owner, name: $repo) {
+                release(tagName: $tag) { isDraft }
+              }
+            }' \
+            -f owner="$GITHUB_REPOSITORY_OWNER" -f repo="${GITHUB_REPOSITORY#*/}" -f tag="$GITHUB_REF_NAME" \
+            --jq '.data.repository |
+              if . == null then "unavailable"
+              elif .release == null then "missing"
+              elif .release.isDraft == true then "draft"
+              elif .release.isDraft == false then "published"
+              else "unavailable"
+              end')
+          case "$state" in
+            missing) echo "exists=false" >> "$GITHUB_OUTPUT" ;;
+            published) echo "exists=true" >> "$GITHUB_OUTPUT" ;;
+            draft)
+              echo "::error::A draft release exists for $GITHUB_REF_NAME. Review it and resolve the draft before rerunning."
+              exit 1
+              ;;
+            *)
+              echo "::error::Could not determine the release state for $GITHUB_REF_NAME."
+              exit 1
+              ;;
+          esac
 
   package:
     needs: check
@@ -82,4 +106,4 @@ jobs:
             (cd dist && sha256sum ./*.zip)
             echo '```'
           } > "$RUNNER_TEMP/notes.md"
-          gh release create "$GITHUB_REF_NAME" dist/*.zip --title "Python Support $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" "${release_flags[@]}"
+          gh release create "$GITHUB_REF_NAME" dist/*.zip --verify-tag --title "Python Support $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" "${release_flags[@]}"
