@@ -310,6 +310,28 @@ try {
   const pluginManifest = JSON.parse(readFileSync(join(unpackedPluginDir, "plugin.json"), "utf8"));
 
   await check("Unix and Windows plugin.json + zh-Hans.json satisfy M3 contract invariants", () => {
+    const metadata = JSON.parse(readFileSync(join(unpackedPluginDir, "grammars", "python.first-line.json"), "utf8"));
+    assert.deepEqual(Object.keys(metadata), ["firstLineMatch"]);
+    const firstLine = new RegExp(metadata.firstLineMatch);
+    for (const line of [
+      "#!/usr/bin/python",
+      "#!/usr/bin/env python3",
+      "#!/usr/bin/env -S python3.13 -I",
+      "#!/usr/bin/env -S /usr/bin/python3 -I",
+      "#!/opt/venv/bin/python3.13t",
+      "#!/usr/bin/env pypy3",
+    ]) {
+      assert.match(line, firstLine);
+    }
+    for (const line of [
+      "#!/usr/bin/env bash",
+      "#!/usr/bin/env python-wrapper",
+      "#!/usr/bin/python3.13.exe",
+      "#!/usr/bin/env node python3",
+      "# Mention #!/usr/bin/env python3",
+    ]) {
+      assert.doesNotMatch(line, firstLine);
+    }
     for (const platform of Object.keys(lock.pyrefly.platforms)) {
       const variant = manifestForPlatform(sourceManifest, platform, lock);
       assert.equal(variant.schemaVersion, 0);
@@ -362,7 +384,8 @@ try {
       });
 
       const pyLang = variant.languages[0];
-      assert.equal("shebang" in pyLang, false);
+      assert.equal(pyLang.grammar, undefined);
+      assert.equal("firstLineMatch" in pyLang, false);
       assert.deepEqual(pyLang.fileExtensions, ["py", "pyi", "pyw"]);
       assert.deepEqual(pyLang.dependencies.projectDependencyPaths, [".venv", "venv", ".conda"]);
 

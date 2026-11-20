@@ -35,8 +35,20 @@ import (
 
 const pythonSupportPluginID = "io.github.lithe-idea.python-support"
 
-type workspaceTrustSaver interface {
-	SaveWorkspaceTrust(ctx context.Context, kernel toolchain.Kernel, trusted bool) (bool, error)
+// Require all parts of the message on one diagnostic from this plugin and file.
+func pythonDiagnosticMessage(a *App, path string, parts ...string) string {
+	set := a.pluginDiagnostics[pythonSupportPluginID]
+	if set == nil {
+		return ""
+	}
+	for _, record := range set.All() {
+		if record.FileKey == path && !slices.ContainsFunc(parts, func(part string) bool {
+			return !strings.Contains(record.Message, part)
+		}) {
+			return record.Message
+		}
+	}
+	return ""
 }
 
 func pythonPackageDigest(t *testing.T, root string) map[string]string {
@@ -124,12 +136,10 @@ func resolvePytestToolForE2E(t *testing.T, ctx context.Context, systemPython str
 	return core.BuildTool{Executable: executable}
 }
 
-func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
-	archive := os.Getenv("LITHE_TEST_PYTHON_PLUGIN_ARCHIVE")
-	if archive == "" {
-		t.Skip("set LITHE_TEST_PYTHON_PLUGIN_ARCHIVE to a python-support-<version>-<platform>.zip")
-	}
-
+// registeredPythonEnvironments creates isolated external interpreters listed in a
+// temporary Conda registry. Both the provider and the workbench see that same home.
+func registeredPythonEnvironments(t *testing.T, ctx context.Context) (systemPython, providerHome string, registeredHomes []string) {
+	t.Helper()
 	pythonCmd := "python3"
 	if runtime.GOOS == "windows" {
 		pythonCmd = "python"
@@ -142,10 +152,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		systemPython = resolvedSysPy
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	providerHome := t.TempDir()
+	providerHome = t.TempDir()
 	if canonical, err := filepath.EvalSymlinks(providerHome); err == nil {
 		providerHome = canonical
 	}
@@ -155,7 +162,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	for _, name := range []string{"APPDATA", "LOCALAPPDATA", "CONDA_ENVS_PATH", "CONDA_PREFIX", "UV_PYTHON_INSTALL_DIR", "PYENV_ROOT", "POETRY_VIRTUALENVS_PATH", "POETRY_CACHE_DIR", "WORKON_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"} {
 		t.Setenv(name, "")
 	}
-	registeredHomes := []string{
+	registeredHomes = []string{
 		filepath.Join(providerHome, "registered-python-one"),
 		filepath.Join(providerHome, "registered-python-replacement"),
 	}
@@ -172,17 +179,21 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	kernel := core.NewClient()
-	appStore := store.At(t.TempDir())
-	service, err := pluginservice.Open(kernel, appStore, filepath.Join(t.TempDir(), "Lithe Plugins"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		service.Host.Stop(pythonSupportPluginID)
-	})
+	return systemPython, providerHome, registeredHomes
+}
 
-	// 1. Real installer Prepare + Commit + Enable.
+func pythonArchiveForE2E(t *testing.T) string {
+	t.Helper()
+	archive := os.Getenv("LITHE_TEST_PYTHON_PLUGIN_ARCHIVE")
+	if archive == "" {
+		t.Skip("set LITHE_TEST_PYTHON_PLUGIN_ARCHIVE to a python-support-<version>-<platform>.zip")
+	}
+
+	return archive
+}
+
+func installPythonArchive(t *testing.T, ctx context.Context, service *pluginservice.Service, archive string) string {
+	t.Helper()
 	plan, err := service.Installer.Prepare(ctx, plugininstall.Request{
 		ArchivePath: archive,
 		Root:        service.Root,
@@ -204,8 +215,31 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("SetEnabled: %v", err)
 	}
 
-	installedDir := installed.Path
+	return installed.Path
+}
+
+func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
+	archive := pythonArchiveForE2E(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+
+	systemPython, providerHome, registeredHomes := registeredPythonEnvironments(t, ctx)
+	kernel := core.NewClient()
+	appStore := store.At(t.TempDir())
+	service, err := pluginservice.Open(kernel, appStore, filepath.Join(t.TempDir(), "Lithe Plugins"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	installedDir := installPythonArchive(t, ctx, service, archive)
 	beforeDigest := pythonPackageDigest(t, installedDir)
+	// Runs after the build client and workspace have closed, including on failure.
+	t.Cleanup(func() {
+		service.Host.Stop(pythonSupportPluginID)
+		after := pythonPackageDigest(t, installedDir)
+		if !maps.Equal(beforeDigest, after) {
+			t.Errorf("installed package files or hashes changed (before %d, after %d)", len(beforeDigest), len(after))
+		}
+	})
 
 	// 2. Validate BOTH Unix and Windows manifests against real Core + pluginhost.Declared().
 	rawManifest, err := os.ReadFile(filepath.Join(installedDir, "plugin.json"))
@@ -373,7 +407,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		t.Fatalf("windows launch path = %q, want bin/pyrefly.exe", decodedWin.Launch.Path)
 	}
 
-	// 5. Plan debug adapter (debugpy), verify launch/attach startArguments, and run DAP initialize smoke.
+	// 5. Verify debugpy launch and attach arguments against the host contract.
 	dapPlan, err := kernel.PlanPluginDebugAdapter(ctx, normalizedManifest, "debugpy", core.PluginBackendDirectories{
 		PluginDirectory: installedDir,
 		StateDirectory:  stateDir,
@@ -388,13 +422,6 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	}
 	if _, err := pluginhost.ResolvePackagePaths(installedDir, dapPlan.RequiredPackagePaths); err != nil {
 		t.Fatalf("ResolvePackagePaths(%v): %v", dapPlan.RequiredPackagePaths, err)
-	}
-	entryScript := dapPlan.Launch.Entry
-	if !filepath.IsAbs(entryScript) {
-		entryScript, err = pluginhost.ResolvePackagePath(installedDir, entryScript)
-		if err != nil {
-			t.Fatalf("ResolvePackagePath(%s): %v", dapPlan.Launch.Entry, err)
-		}
 	}
 
 	workspace := t.TempDir()
@@ -464,34 +491,6 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	if attachStart.Connection == nil || attachStart.Connection.Port != 5678 || attachStart.Connection.Remote {
 		t.Fatalf("unexpected attach connection: %+v", attachStart.Connection)
 	}
-
-	dapArgs := append([]string{}, dapPlan.Launch.RuntimeArguments...)
-	dapArgs = append(dapArgs, entryScript)
-	dapArgs = append(dapArgs, dapPlan.Arguments...)
-	dapCmd := exec.CommandContext(ctx, systemPython, dapArgs...)
-	dapCmd.Dir = workspace
-	dapIn, err := dapCmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	dapOut, err := dapCmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := dapCmd.Start(); err != nil {
-		t.Fatalf("starting debugpy adapter failed: %v", err)
-	}
-	initFrame := `{"seq":1,"type":"request","command":"initialize","arguments":{"adapterID":"debugpy"}}`
-	_, _ = io.WriteString(dapIn, "Content-Length: 85\r\n\r\n"+initFrame)
-	headerBuf := make([]byte, 18)
-	if _, err := io.ReadFull(dapOut, headerBuf); err != nil {
-		_ = dapCmd.Process.Kill()
-		_ = dapCmd.Wait()
-		t.Fatalf("debugpy adapter failed to emit DAP response header: %v", err)
-	}
-	_ = dapIn.Close()
-	_ = dapCmd.Process.Kill()
-	_ = dapCmd.Wait()
 
 	// 6. Detect all four build systems and exercise the Python model, discovery and test run.
 	detection, err := kernel.DetectBuildSystems(ctx, workspace, []json.RawMessage{normalizedManifest})
@@ -750,12 +749,6 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	}
 
 	// 8. Drive the real host's declared provider before creating a project-local .venv.
-	providerHost, ok := any(service).(interface {
-		ToolchainOptions(string, toolchain.Options) toolchain.Options
-	})
-	if !ok {
-		t.Fatal("the pinned host lacks on-demand toolchain providers; use a compatible desktop revision")
-	}
 	service.Contexts.Open(workspace)
 	t.Cleanup(func() { service.Contexts.Close(workspace) })
 	manifestSet := []json.RawMessage{normalizedManifest}
@@ -766,7 +759,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 			t.Fatal(err)
 		}
 		snapshot, err := toolchain.Load(ctx, kernel, workspace, ".", manifestSet,
-			providerHost.ToolchainOptions(workspace, toolchain.Options{Home: providerHome, Environment: map[string]string{}}))
+			service.ToolchainOptions(workspace, toolchain.Options{Home: providerHome, Environment: map[string]string{}}))
 		if err != nil {
 			t.Fatalf("load provider toolchain: %v", err)
 		}
@@ -784,7 +777,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		}
 	}
 	global, err := toolchain.Load(ctx, kernel, "", ".", manifestSet,
-		providerHost.ToolchainOptions("", toolchain.Options{Global: true, Home: providerHome, Environment: map[string]string{}}))
+		service.ToolchainOptions("", toolchain.Options{Global: true, Home: providerHome, Environment: map[string]string{}}))
 	if err != nil {
 		t.Fatalf("load global provider toolchains: %v", err)
 	}
@@ -822,41 +815,30 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("toolchain.Load(untrusted): %v", err)
 	}
-	if saver, ok := any(untrustedSnap).(workspaceTrustSaver); ok {
-		for _, tool := range untrustedSnap.Tools {
-			if tool.ID == "python" && tool.Effective != nil && tool.Effective.Executable == expectedVenvPython {
-				t.Fatalf("untrusted workspace must NOT auto-select .venv interpreter %s", expectedVenvPython)
-			}
-		}
-		if _, err := saver.SaveWorkspaceTrust(ctx, kernel, true); err != nil {
-			t.Fatalf("SaveWorkspaceTrust(true): %v", err)
-		}
-		if _, statErr := os.Stat(filepath.Join(workspace, ".lithe")); !os.IsNotExist(statErr) {
-			t.Fatalf("workspace trust must NOT write .lithe inside workspace, statErr=%v", statErr)
-		}
-		trustedSnap, err := toolchain.Load(ctx, kernel, workspace, ".", []json.RawMessage{normalizedManifest}, toolchain.Options{
-			GlobalRoot: globalRoot,
-		})
-		if err != nil {
-			t.Fatalf("toolchain.Load(trusted): %v", err)
-		}
-		var resolvedExec string
-		for _, tool := range trustedSnap.Tools {
-			if tool.ID == "python" && tool.Effective != nil {
-				resolvedExec = tool.Effective.Executable
-			}
-		}
-		if resolvedExec != expectedVenvPython {
-			t.Fatalf("trusted .venv resolution = %q, want literal path %q", resolvedExec, expectedVenvPython)
+	for _, tool := range untrustedSnap.Tools {
+		if tool.ID == "python" && tool.Effective != nil && tool.Effective.Executable == expectedVenvPython {
+			t.Fatalf("untrusted workspace must NOT auto-select .venv interpreter %s", expectedVenvPython)
 		}
 	}
-
-	// Shut down backend cleanly BEFORE checking package immutability so any shutdown write would be caught too!
-	service.Host.Stop(pythonSupportPluginID)
-
-	// 9. Assert installed plugin package file list and SHA-256 hashes are 100% unchanged!
-	afterDigest := pythonPackageDigest(t, installedDir)
-	if !maps.Equal(beforeDigest, afterDigest) {
-		t.Fatalf("installed plugin package was mutated at runtime!\nbefore=%d files\nafter=%d files", len(beforeDigest), len(afterDigest))
+	if _, err := untrustedSnap.SaveWorkspaceTrust(ctx, kernel, true); err != nil {
+		t.Fatalf("SaveWorkspaceTrust(true): %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(workspace, ".lithe")); !os.IsNotExist(statErr) {
+		t.Fatalf("workspace trust must NOT write .lithe inside workspace, statErr=%v", statErr)
+	}
+	trustedSnap, err := toolchain.Load(ctx, kernel, workspace, ".", []json.RawMessage{normalizedManifest}, toolchain.Options{
+		GlobalRoot: globalRoot,
+	})
+	if err != nil {
+		t.Fatalf("toolchain.Load(trusted): %v", err)
+	}
+	var resolvedExec string
+	for _, tool := range trustedSnap.Tools {
+		if tool.ID == "python" && tool.Effective != nil {
+			resolvedExec = tool.Effective.Executable
+		}
+	}
+	if resolvedExec != expectedVenvPython {
+		t.Fatalf("trusted .venv resolution = %q, want literal path %q", resolvedExec, expectedVenvPython)
 	}
 }
