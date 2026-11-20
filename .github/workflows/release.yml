@@ -106,4 +106,20 @@ jobs:
             (cd dist && sha256sum ./*.zip)
             echo '```'
           } > "$RUNNER_TEMP/notes.md"
+
+          # The artifacts came from the event checkout even if the remote tag has since moved.
+          packaged_commit=$(git rev-parse HEAD)
+          if ! remote_tag=$(git ls-remote --exit-code origin "$GITHUB_REF" "$GITHUB_REF^{}"); then
+            echo "::error::Could not resolve release tag $GITHUB_REF_NAME on origin. Check the tag before retrying."
+            exit 1
+          fi
+          remote_commit=$(awk -v ref="$GITHUB_REF" '
+            $2 == ref { object = $1 }
+            $2 == ref "^{}" { peeled = $1 }
+            END { print (peeled != "" ? peeled : object) }
+          ' <<< "$remote_tag")
+          if [[ "$remote_commit" != "$packaged_commit" ]]; then
+            echo "::error::Release tag $GITHUB_REF_NAME no longer points to the packaged commit. Use the run for the current tag."
+            exit 1
+          fi
           gh release create "$GITHUB_REF_NAME" dist/*.zip --verify-tag --title "Python Support $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" "${release_flags[@]}"
