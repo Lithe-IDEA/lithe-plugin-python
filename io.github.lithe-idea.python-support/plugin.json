@@ -12,7 +12,7 @@
   "pluginAPIVersion": 0,
   "requires": {
     "backend": 0,
-    "buildProviders": 0,
+    "buildProviders": 1,
     "buildSystems": 1,
     "debugAdapters": 0,
     "languageServers": 0,
@@ -543,6 +543,11 @@
         }
       ],
       "run": [
+        {
+          "id": "main",
+          "source": "provider",
+          "entrypoints": true
+        },
         {
           "id": "script",
           "fromTargets": { "tags": ["script"] },

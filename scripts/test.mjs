@@ -367,7 +367,7 @@ try {
         "toolchainProviders",
       ]);
       for (const [capability, version] of Object.entries(variant.requires)) {
-        assert.equal(version, capability === "buildSystems" ? 1 : 0);
+        assert.equal(version, ["buildSystems", "buildProviders"].includes(capability) ? 1 : 0);
       }
       assert.deepEqual([...variant.permissions].sort(), [
         "backend.launch",
@@ -418,6 +418,9 @@ try {
       assert.equal(pyBuild.provider.executesProjectCode, true);
       assert.equal(pyBuild.provider.mayUseNetwork, false);
       assert.deepEqual(pyBuild.model, { source: "provider" });
+      assert.deepEqual(pyBuild.run.find(({ id }) => id === "main"), {
+        id: "main", source: "provider", entrypoints: true,
+      });
       assert.equal(pyBuild.test.source, "provider");
       assert.equal("discovery" in pyBuild.test, false);
       assert.deepEqual(pyBuild.test.discoveryCommand, {
@@ -1590,6 +1593,45 @@ try {
         false,
         "runEntrypoints must suppress high-frequency success INFO logs",
       );
+
+      const prepareRun = async (id, launchOptions) => {
+        peer.send({
+          jsonrpc: "2.0", id, method: "lithe/build/prepareRun",
+          params: {
+            operationID: `op-prepare-run-${id}`, buildSystemID: "python", root: ".", run: "main",
+            project: epResp.result.entrypoints[0].project,
+            options: {}, optionArguments: ["option"], userArguments: ["fallback"],
+            environment: { LITHE_TEST_RUN_VALUE: "default" }, launchOptions,
+          },
+        });
+        return peer.waitFor((m) => m.id === id, "prepare a Python entrypoint");
+      };
+      const scriptLaunch = await prepareRun(71, {
+        entrypoint: epResp.result.entrypoints[0].entrypoint, runtimeArguments: ["-B"],
+        arguments: ["argument with spaces"], environment: { LITHE_TEST_RUN_VALUE: "override" },
+      });
+      assert.deepEqual(scriptLaunch.result, {
+        executable: { kind: "toolchain", value: "python" },
+        arguments: ["-B", join(realpathSync(wsDir), "worker.py"), "option", "argument with spaces"],
+        workingDirectory: ".", environment: { LITHE_TEST_RUN_VALUE: "override" },
+      });
+
+      const moduleDir = join(wsDir, "src", "run_demo");
+      mkdirSync(moduleDir, { recursive: true });
+      writeFileSync(join(moduleDir, "__init__.py"), "VALUE = 'from src'\n");
+      writeFileSync(join(moduleDir, "__main__.py"), "from . import VALUE\nimport sys\nprint(VALUE, *sys.argv[1:])\n");
+      const moduleLaunch = await prepareRun(72, {
+        entrypoint: "module:src/run_demo/__main__.py", runtimeArguments: ["-B"], workingDirectory: "tests",
+      });
+      assert.equal(moduleLaunch.result.workingDirectory, "tests");
+      assert.equal(run(pythonCmd, moduleLaunch.result.arguments, { cwd: join(wsDir, "tests") }).trim(), "from src option fallback");
+
+      for (const [id, entrypoint] of [[73, "script:../worker.py"], [74, "script:missing.py"]]) {
+        const response = await prepareRun(id, { entrypoint });
+        assert.equal(response.error?.code, -32000);
+        assert.ok(peer.allReceived.some((m) => m.method === "lithe/log"
+          && m.params?.operationId === `op-prepare-run-${id}` && m.params?.code === "python.staleRunEntrypoint"));
+      }
 
       // 6. $/cancelRequest terminates active pytest subprocess tree cleanly with zero orphan processes!
       const pidFile = join(scratch, "slow-test.pid");

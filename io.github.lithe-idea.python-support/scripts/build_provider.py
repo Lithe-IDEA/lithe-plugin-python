@@ -29,6 +29,10 @@ from lithe_rpc import (  # noqa: E402
 )
 
 _JUNIT_REPORT_REL = ".pytest_cache/lithe-junit.xml"
+_RUN_MODULE = (
+    "import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); "
+    "runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)"
+)
 
 def file_uri_to_path(uri: str) -> Optional[Path]:
     parsed = urlparse(uri)
@@ -370,10 +374,58 @@ def create_build_provider_server() -> JsonRpcServer:
             "entrypoints": entrypoints,
         }
 
+    def handle_prepare_run(params: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
+        ctx.raise_if_cancelled()
+        norm_root, instance_dir = _resolve_instance(params)
+        project = params.get("project")
+        launch = params.get("launchOptions")
+        if (params.get("run") != "main" or params.get("target") is not None
+                or not isinstance(project, dict) or project.get("path") != norm_root
+                or not isinstance(launch, dict)):
+            raise PluginError("python.invalidRunEntrypoint", "Run this file from its Python project.")
+
+        entrypoint = launch.get("entrypoint")
+        if not isinstance(entrypoint, str):
+            raise PluginError("python.invalidRunEntrypoint", "Select a Python file to run.")
+        kind, _, relative_file = entrypoint.partition(":")
+        if (kind not in ("script", "module") or relative_file.startswith("/")
+                or any(char in relative_file for char in ("\\", ":", "\x00"))):
+            raise PluginError("python.invalidRunEntrypoint", "Select a Python file inside the project.")
+
+        # Saved configurations can outlive their source or its main guard.
+        entries = inspect_file_entrypoints(instance_dir, relative_file, project)
+        if not entries or entries[0]["entrypoint"] != entrypoint:
+            raise PluginError("python.staleRunEntrypoint", "The saved Python entry point is unavailable. Open a runnable Python file and run it again.")
+
+        working_directory = launch.get("workingDirectory") or norm_root
+        if kind == "script":
+            program = [str(instance_dir / relative_file)]
+        elif relative_file.startswith("src/") or working_directory != norm_root:
+            # Keep module imports rooted in the build instance even when using a custom cwd.
+            module_root = instance_dir / "src" if relative_file.startswith("src/") else instance_dir
+            program = ["-c", _RUN_MODULE, str(module_root), entries[0]["name"]]
+        else:
+            program = ["-m", entries[0]["name"]]
+
+        environment = dict(params.get("environment") or {})
+        environment.update(launch.get("environment") or {})
+        return {
+            "executable": {"kind": "toolchain", "value": "python"},
+            "arguments": [
+                *_string_args(launch.get("runtimeArguments")),
+                *program,
+                *_string_args(params.get("optionArguments")),
+                *_string_args(launch.get("arguments", params.get("userArguments"))),
+            ],
+            "workingDirectory": working_directory,
+            "environment": environment,
+        }
+
     server.on_initialize(_on_init)
     server.build_handler("lithe/build/model", handle_model)
     server.build_handler("lithe/build/test", handle_test)
     server.build_handler("lithe/build/runEntrypoints", handle_run_entrypoints)
+    server.build_handler("lithe/build/prepareRun", handle_prepare_run)
     server.suppress_success_diagnostics("lithe/build/runEntrypoints")
     return server
 
