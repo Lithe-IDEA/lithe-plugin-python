@@ -1,5 +1,31 @@
 {
   "$schema": "https://raw.githubusercontent.com/Lithe-IDEA/Lithe-core-rust/main/shared/plugins/contract/v1/plugin-l10n.schema.json",
+  "runConfigurationTypes": {
+    "python": {
+      "python": {
+        "displayName": "Python",
+        "description": "使用当前项目选定的解释器运行 Python 脚本或模块。",
+        "fields": {
+          "targetKind": {
+            "title": "运行目标",
+            "options": {
+              "script": "脚本",
+              "module": "模块"
+            }
+          },
+          "script": { "title": "脚本路径" },
+          "module": {
+            "title": "模块名",
+            "description": "通过 -m 传给 Python 的点分隔导入名称。"
+          },
+          "interpreterOptions": {
+            "title": "解释器选项",
+            "description": "放在脚本或模块之前的 Python 选项。"
+          }
+        }
+      }
+    }
+  },
   "settings": {
     "pythonExecutable": {
       "title": "Python 解释器覆盖路径",
