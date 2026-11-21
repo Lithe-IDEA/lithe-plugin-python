@@ -7,9 +7,9 @@ from collections import deque
 from importlib import metadata
 from pathlib import Path
 
-# Run with -E -B to ignore inherited PYTHONPATH and still inspect the selected
-# interpreter's normal site directories. Resolve PEP 508 with the bundled parser,
-# even in a pip-free environment. Remove its path before discovering packages.
+# The manifest uses -I -B to skip user-site startup hooks and bytecode writes.
+# Use the bundled PEP 508 parser even in pip-free environments, and remove its
+# path before discovering distributions so bundled packages stay out of the tree.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vendor"))
 try:
     from packaging.requirements import InvalidRequirement, Requirement

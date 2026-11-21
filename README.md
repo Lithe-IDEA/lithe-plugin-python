@@ -35,7 +35,7 @@ Python Support v1.0.0 requires Lithe 0.8.9 or later. Lithe 0.8.9 can install the
      - `scripts/run_entrypoint.py` 随插件 ZIP 安装，运行时只读。它在宿主管理的进程树内转发解释器覆盖，并检查包入口的实际来源。包名被其他模块遮蔽时给出错误。旧宿主未传界面语言时，入口错误同时提供中英文。
      - 仅用 `environment.yml` 或 `environment.yaml` 管理 Conda 环境的项目也会识别为 Python 构建实例。
      - 在「运行/调试配置 → ＋ → Python」手动配置脚本路径或模块名。可设置解释器选项、脚本参数、工作目录和环境变量。运行时沿用项目的 Python 工具链及解释器覆盖设置，支持选用 Conda、uv 和普通虚拟环境。
-     - 构建面板的「依赖」显示所选解释器中已安装的 Python 包版本与依赖关系。展开或重新加载时读取发行包元数据，支持无 pip 的环境。包共享的子树只展开一次，循环依赖以叶节点结束。
+     - 构建面板的「依赖」显示所选解释器中已安装的 Python 包版本与依赖关系。展开或重新加载时用 `python -I -B` 读取发行包元数据，跳过用户级 site-packages 及其启动钩子，支持无 pip 的环境。包共享的子树只展开一次，循环依赖以叶节点结束。
      - 同时保留声明式任务 `pip install -r requirements.txt` 与 `mypy`（带诊断 `lineMatcher`）。
    - `uv`（`uv.lock`）：`uv sync`、`uv lock`。
    - `conda`（`environment.yml` / `environment.yaml`）：`conda env update --file environment.yml --prune`。

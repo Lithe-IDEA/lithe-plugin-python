@@ -26,7 +26,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, normalize, resolve } from "node:path";
+import { basename, dirname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readZipEntries } from "./lib/archive.mjs";
 import { backendPath } from "./lib/backend.mjs";
@@ -308,6 +308,34 @@ try {
   }
 
   const pluginManifest = JSON.parse(readFileSync(join(unpackedPluginDir, "plugin.json"), "utf8"));
+  const dependencyCommand = pluginManifest.buildSystems.find(({ id }) => id === "python").dependencies;
+  const dependencyArguments = (outputFile) => dependencyCommand.arguments.map((arg) =>
+    arg.replace("${pluginDir}", unpackedPluginDir).replace("${outputFile}", outputFile));
+
+  await check("dependency command skips user-site startup hooks", () => {
+    const environment = join(scratch, "dependency environment with shared site");
+    run(pythonCmd, ["-I", "-B", "-m", "venv", "--without-pip", "--system-site-packages", environment]);
+    const python = process.platform === "win32"
+      ? join(environment, "Scripts", "python.exe")
+      : join(environment, "bin", "python");
+    const userBase = join(scratch, "dependency user base");
+    const env = { ...process.env, PYTHONUSERBASE: userBase };
+    const userSite = run(python, ["-E", "-B", "-c", "import site; assert site.ENABLE_USER_SITE; print(site.getusersitepackages())"], {
+      cwd: scratch, env,
+    }).trim();
+    assert.ok(userSite.startsWith(userBase + sep), "expected a user site under the test's PYTHONUSERBASE");
+    mkdirSync(userSite, { recursive: true });
+    writeFileSync(join(userSite, "usercustomize.py"), [
+      "from pathlib import Path",
+      'Path(__file__).with_name("user-site-hook-ran").touch()',
+      "",
+    ].join("\n"));
+
+    const treeFile = join(scratch, "isolated-dependencies.json");
+    run(python, dependencyArguments(treeFile), { cwd: scratch, env });
+    assert.equal(existsSync(join(userSite, "user-site-hook-ran")), false, "usercustomize.py was executed");
+    assert.equal(JSON.parse(readFileSync(treeFile, "utf8")).format, "litheDependencies");
+  });
 
   await check("dependency command reads installed packages from a pip-free Python environment", () => {
     const environment = join(scratch, "dependency environment");
@@ -335,12 +363,9 @@ try {
     metadata("CycleB", "5.0", ["CycleA"]);
 
     const treeFile = join(scratch, "dependencies.json");
-    const declaration = pluginManifest.buildSystems.find(({ id }) => id === "python").dependencies;
-    assert.equal(declaration.output, "outputFile");
-    assert.equal(declaration.decoder, "litheDependencies");
-    const args = declaration.arguments.map((arg) =>
-      arg.replace("${pluginDir}", unpackedPluginDir).replace("${outputFile}", treeFile));
-    run(python, args, { cwd: scratch });
+    assert.equal(dependencyCommand.output, "outputFile");
+    assert.equal(dependencyCommand.decoder, "litheDependencies");
+    run(python, dependencyArguments(treeFile), { cwd: scratch });
     const leaf = (name, version, children = []) => ({ name, version, children });
     assert.deepEqual(JSON.parse(readFileSync(treeFile, "utf8")), {
       format: "litheDependencies", version: 0, dependencies: [

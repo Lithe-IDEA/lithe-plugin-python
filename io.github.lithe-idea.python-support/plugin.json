@@ -594,7 +594,7 @@
       "dependencies": {
         "source": "command",
         "scopes": ["project"],
-        "arguments": ["-E", "-B", "${pluginDir}/scripts/dependencies.py", "${outputFile}"],
+        "arguments": ["-I", "-B", "${pluginDir}/scripts/dependencies.py", "${outputFile}"],
         "output": "outputFile",
         "decoder": "litheDependencies",
         "executesProjectCode": true,
