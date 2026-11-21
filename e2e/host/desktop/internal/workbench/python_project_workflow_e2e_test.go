@@ -54,7 +54,8 @@ func TestPythonSupportPluginManualRunAndDependencies(t *testing.T) {
 		}
 	}
 	program := "import os, sys\nprint(sys.prefix)\nprint(os.getcwd())\nprint(sys.flags.dev_mode, os.environ['PROFILE_TEST'], repr(sys.argv[1:]))\n"
-	write(filepath.Join(root, "requirements.txt"), "root-demo==1.0\n")
+	// A Conda environment file is this workspace's only build marker.
+	write(filepath.Join(root, "environment.yml"), "name: manual-run\ndependencies:\n  - python\n")
 	write(filepath.Join(root, "manual script.py"), program)
 	write(filepath.Join(work, "manual_module.py"), program)
 	purelib := strings.TrimSpace(string(site))
@@ -169,18 +170,22 @@ func TestPythonSupportPluginManualRunAndDependencies(t *testing.T) {
 		})
 	}
 
-	var instance *buildInstance
+	var instanceIndex int
 	awaitStateWithin(t, h, 10*time.Second, "the Python model with a project", func() bool {
 		for index := range p.build.instances {
 			candidate := &p.build.instances[index]
 			if candidate.BuildSystemID == "python" && candidate.modelLoaded && len(candidate.Model.Projects) == 1 {
-				instance = candidate
+				instanceIndex = index
 				return true
 			}
 		}
 		return false
 	})
-	h.app.post(func(a *App) { a.reduceChrome(core.SetChromeOpen(itemBuild, true)) })
+	instance := &p.build.instances[instanceIndex]
+	h.app.post(func(a *App) {
+		a.selectBuildInstance(p, instanceIndex)
+		a.reduceChrome(core.SetChromeOpen(itemBuild, true))
+	})
 	var section buildRow
 	awaitStateWithin(t, h, 10*time.Second, "the Dependencies section in the Build panel", func() bool {
 		rows, _ := h.app.buildTreeRows(p)

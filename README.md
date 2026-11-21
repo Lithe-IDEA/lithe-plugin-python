@@ -33,6 +33,7 @@ Python Support v1.0.0 requires Lithe 0.8.9 or later. Lithe 0.8.9 can install the
      - `lithe/build/test`：通过 pytest node ID 精确运行套件或单个用例，也接受 JUnit XML 类名。指定用例时须同时给出套件。运行时推送 `lithe/build/progress`，并产出 `.pytest_cache/lithe-junit.xml` 供 Core 解码。构建请求在排队时即可取消，执行进程的所有权随请求结束。macOS 和 Linux 使用 POSIX 进程组，Windows 使用 Job Object。
      - 顶部「当前文件 → 运行」支持带 `__main__` 入口的脚本和包内 `__main__.py`。`lithe/build/runEntrypoints` 静态发现入口，`lithe/build/prepareRun` 返回启动计划。默认使用项目选定的 Python；指定「Python 解释器覆盖」时，使用宿主解析的显式解释器。
      - `scripts/run_entrypoint.py` 随插件 ZIP 安装，运行时只读。它在宿主管理的进程树内转发解释器覆盖，并检查包入口的实际来源。包名被其他模块遮蔽时给出错误。旧宿主未传界面语言时，入口错误同时提供中英文。
+     - 仅用 `environment.yml` 或 `environment.yaml` 管理 Conda 环境的项目也会识别为 Python 构建实例。
      - 在「运行/调试配置 → ＋ → Python」手动配置脚本路径或模块名。可设置解释器选项、脚本参数、工作目录和环境变量。运行时沿用项目的 Python 工具链及解释器覆盖设置，支持选用 Conda、uv 和普通虚拟环境。
      - 构建面板的「依赖」显示所选解释器中已安装的 Python 包版本与依赖关系。展开或重新加载时读取发行包元数据，支持无 pip 的环境。包共享的子树只展开一次，循环依赖以叶节点结束。
      - 同时保留声明式任务 `pip install -r requirements.txt` 与 `mypy`（带诊断 `lineMatcher`）。

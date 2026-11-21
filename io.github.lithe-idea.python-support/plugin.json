@@ -483,7 +483,9 @@
       "displayName": "Python",
       "icon": { "path": "icons/python.svg" },
       "detection": {
-        "markers": ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"]
+        "markers": [
+          "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "environment.yml", "environment.yaml"
+        ]
       },
       "invocation": {
         "executables": [
@@ -737,7 +739,9 @@
         ]
       },
       "sync": {
-        "watch": ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"]
+        "watch": [
+          "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "environment.yml", "environment.yaml"
+        ]
       },
       "layout": {
         "excluded": [".venv", "venv", ".conda"],
