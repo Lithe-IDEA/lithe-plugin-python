@@ -26,12 +26,13 @@ Python Support v1.0.0 requires Lithe 0.8.9 or later. Lithe 0.8.9 can install the
    - 严格按 Core 4 层优先级解析：项目级显式绑定 → 项目内环境（`.venv` / `venv` / `.conda`，`projectKind: "environment"`，受宿主工作区信任门控并保留字面软链路径）→ 全局设置 → `VIRTUAL_ENV` 与 `PATH`（`python3` / `python`）→ 16 条跨平台自动发现规则（覆盖 `UV_PYTHON_INSTALL_DIR`、`XDG_DATA_HOME`、`PYENV_ROOT`、`CONDA_ENVS_PATH`、`CONDA_PREFIX`、`WORKON_HOME`、`LOCALAPPDATA`、`APPDATA`、Homebrew、macOS Framework、`~/.pyenv`、`~/.local/share/uv`、`*conda*/envs/*`、`miniforge*/envs/*`）。
    - Rust 提供者读取 conda 环境登记表和安装元数据，以及 uv、pyenv、Poetry、Pipenv 管理的外部环境。项目中的 `.python-version` 选择版本，同一目录的 `pyproject.toml` 限制可选版本。Pipenv 默认环境按完整的 `Pipfile` 路径匹配，并遵守同目录的 Python 版本约束。宿主观察这些输入并在变化后重新查询。
    - 需要支持 `toolchainProviders: 0` 的 Lithe 桌面端。外部环境的解释器链接若指向环境目录之外，Core 会拒绝将该环境作为提供者候选。常见于以链接方式创建的 Unix Poetry/Pipenv 环境。使用常规可执行文件副本的环境可被发现，项目内 `.venv` 继续使用宿主的信任流程。
-4. **4 个独立构建系统与动态 `pytest` 测试树（`buildSystems: 1` 与 `buildProviders`）**
+4. **构建、运行与动态 `pytest` 测试树（`buildSystems: 1` 与 `buildProviders: 1`）**
    - `python` 通过 `test.discoveryCommand` 启动 `python -I -B scripts/discover_tests.py`。宿主使用选定解释器和构建实例目录运行命令，并提供 `${outputFile}`。命令运行 `pytest --collect-only`，汇报函数、类方法和参数化用例的精确选择器。发现为空时写入有效的 `litheTestDiscovery` v0 空列表。选择器或报告超出契约限制时整次发现失败。pytest 缓存与报告位于宿主 `${workspaceStateDir}` 下的本次发现目录，由宿主在操作结束时清理。宿主负责取消并回收整个进程树，收集脚本保留 45 秒的 pytest 超时。
    - Python 构建提供者 `scripts/build_provider.py` 使用 `python -I -B` 启动，处理以下请求。
      - `lithe/build/model`：复用 `scripts/build_model.py` 纯 `ast` + `tomllib`（Python 3.9–3.10 自动回退内置 `vendor/tomli`）静态提取 `[project.scripts]`、包 `__main__.py`、顶层 `__main__` 脚本、Django `manage.py`、FastAPI ASGI、Flask WSGI 运行目标（绝不执行用户代码），派生 7 类声明式 `run` 配置；
      - `lithe/build/test`：通过 pytest node ID 精确运行套件或单个用例，也接受 JUnit XML 类名。指定用例时须同时给出套件。运行时推送 `lithe/build/progress`，并产出 `.pytest_cache/lithe-junit.xml` 供 Core 解码。构建请求在排队时即可取消，执行进程的所有权随请求结束。macOS 和 Linux 使用 POSIX 进程组，Windows 使用 Job Object。
-     - `lithe/build/runEntrypoints`：协商 `litheBuild` 1 时按文件静态识别入口并抑制高频成功日志；
+     - 顶部「当前文件 → 运行」支持带 `__main__` 入口的脚本和包内 `__main__.py`。`lithe/build/runEntrypoints` 静态发现入口，`lithe/build/prepareRun` 返回启动计划。默认使用项目选定的 Python；指定「Python 解释器覆盖」时，使用宿主解析的显式解释器。
+     - `scripts/run_entrypoint.py` 随插件 ZIP 安装，运行时只读。它在宿主管理的进程树内转发解释器覆盖，并检查包入口的实际来源。包名被其他模块遮蔽时给出错误。旧宿主未传界面语言时，入口错误同时提供中英文。
      - 同时保留声明式任务 `pip install -r requirements.txt` 与 `mypy`（带诊断 `lineMatcher`）。
    - `uv`（`uv.lock`）：`uv sync`、`uv lock`。
    - `conda`（`environment.yml` / `environment.yaml`）：`conda env update --file environment.yml --prune`。
@@ -62,6 +63,7 @@ Rust SDK 和构建提供者的 `scripts/lithe_rpc.py` 通过 stdio JSON-RPC 2.0 
 | `lithe/build/model` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "pyproject_parse_failed"`，`count: 1`）<br>恢复：`plugins.operation.recovery_finished`（`code: "pyproject_restored"`，`count: 1`） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `pyproject_parse_failed`、`pyproject_restored`、`python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
 | `lithe/build/test` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`；测试断言失败仍属正常协议返回 `exitCode != 0`，失效/越界选择器、进程级超时或解释器缺失才记 `ERROR`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidTestSelector`、`python.staleTestSelector`、`python.pytestTimedOut`、`python.interpreterUnavailable`、`python.projectUnavailable`、`internal_error` |
 | `lithe/build/runEntrypoints` | `build_provider.py` | **已启用 `suppressSuccessDiagnostics`**（打开文件高频静态入口探测成功不发 `INFO`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
+| `lithe/build/prepareRun` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidRunEntrypoint`、`python.staleRunEntrypoint`、`python.interpreterUnavailable`、`python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
 | `notification` / `result-encoding` / `shutdown` | `lithe_rpc.py` | — | — | `plugins.operation.failed`（`ERROR`） | `framing_error`、`result_encoding_failed`、`internal_error` |
 
 `toolchains/query` 是高频只读操作，成功由 SDK 返回事实。取消、读取失败、扫描超限与不安全输入通过 `plugin.toolchain.*` 结构化返回。宿主工具链层观察并处理查询及解码失败。协议 v0 的 SDK 无该操作的诊断回调。

@@ -673,7 +673,8 @@ def inspect_file_entrypoints(root_dir: Path, rel_file_posix: str, project_select
                 results.append({
                     "run": "main",
                     "name": mod_name,
-                    "entrypoint": f"module:{mod_name}",
+                    # Keep the source path so preparation can distinguish root and src layouts.
+                    "entrypoint": f"module:{clean_rel}",
                     "project": project_selection,
                 })
         return results

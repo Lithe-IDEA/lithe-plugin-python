@@ -27,8 +27,10 @@ from lithe_rpc import (  # noqa: E402
     PluginError,
     run_bounded_process,
 )
+from run_entrypoint import run_message  # noqa: E402
 
 _JUNIT_REPORT_REL = ".pytest_cache/lithe-junit.xml"
+_ENTRYPOINT_LAUNCHER = str(Path(_SCRIPTS_DIR) / "run_entrypoint.py")
 
 def file_uri_to_path(uri: str) -> Optional[Path]:
     parsed = urlparse(uri)
@@ -182,8 +184,16 @@ def create_build_provider_server() -> JsonRpcServer:
     workspace_root_holder: dict[str, Path] = {"root": Path.cwd().resolve()}
     degraded_model_roots: set[str] = set()
     state_lock = threading.Lock()
+    configured_interpreter = False
+    locale = ""
 
     def _on_init(params: dict[str, Any]) -> None:
+        nonlocal configured_interpreter, locale
+        initialization = params.get("initializationOptions")
+        if isinstance(initialization, dict):
+            configured_interpreter = bool(initialization.get("pythonExecutable"))
+        if isinstance(params.get("locale"), str):
+            locale = params["locale"]
         folders = params.get("workspaceFolders")
         if isinstance(folders, list) and folders:
             first = folders[0]
@@ -370,10 +380,66 @@ def create_build_provider_server() -> JsonRpcServer:
             "entrypoints": entrypoints,
         }
 
+    def handle_prepare_run(params: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
+        ctx.raise_if_cancelled()
+        norm_root, instance_dir = _resolve_instance(params)
+        project = params.get("project")
+        launch = params.get("launchOptions")
+        if (params.get("run") != "main" or params.get("target") is not None
+                or not isinstance(project, dict) or project.get("path") != norm_root
+                or not isinstance(launch, dict)):
+            raise PluginError("python.invalidRunEntrypoint", run_message("invalid", locale))
+
+        entrypoint = launch.get("entrypoint")
+        if not isinstance(entrypoint, str):
+            raise PluginError("python.invalidRunEntrypoint", run_message("invalid", locale))
+        kind, _, relative_file = entrypoint.partition(":")
+        if (kind not in ("script", "module") or relative_file.startswith("/")
+                or any(char in relative_file for char in ("\\", ":", "\x00"))):
+            raise PluginError("python.invalidRunEntrypoint", run_message("invalid", locale))
+
+        # Saved configurations can outlive their source or its main guard.
+        entries = inspect_file_entrypoints(instance_dir, relative_file, project)
+        if not entries or entries[0]["entrypoint"] != entrypoint:
+            raise PluginError("python.staleRunEntrypoint", run_message("stale", locale))
+
+        working_directory = launch.get("workingDirectory") or norm_root
+        source = str(instance_dir / relative_file)
+        if kind == "script":
+            program = [source]
+        else:
+            module_root = instance_dir / "src" if relative_file.startswith("src/") else instance_dir
+            program = [_ENTRYPOINT_LAUNCHER, "package", str(module_root), entries[0]["name"], source, locale]
+
+        environment = dict(params.get("environment") or {})
+        environment.update(launch.get("environment") or {})
+        if kind == "module":
+            environment.setdefault("PYTHONIOENCODING", "utf-8")
+        arguments = [
+            *_string_args(launch.get("runtimeArguments")),
+            *program,
+            *_string_args(params.get("optionArguments")),
+            *_string_args(launch.get("arguments", params.get("userArguments"))),
+        ]
+        if configured_interpreter:
+            tool = params.get("tool")
+            executable = tool.get("executable") if isinstance(tool, dict) else None
+            if not isinstance(executable, str) or not Path(executable).is_absolute():
+                raise PluginError("python.interpreterUnavailable", run_message("interpreter", locale))
+            environment.setdefault("PYTHON_EXECUTABLE", executable)
+            arguments = ["-I", "-B", _ENTRYPOINT_LAUNCHER, "interpreter", executable, *arguments]
+        return {
+            "executable": {"kind": "toolchain", "value": "python"},
+            "arguments": arguments,
+            "workingDirectory": working_directory,
+            "environment": environment,
+        }
+
     server.on_initialize(_on_init)
     server.build_handler("lithe/build/model", handle_model)
     server.build_handler("lithe/build/test", handle_test)
     server.build_handler("lithe/build/runEntrypoints", handle_run_entrypoints)
+    server.build_handler("lithe/build/prepareRun", handle_prepare_run)
     server.suppress_success_diagnostics("lithe/build/runEntrypoints")
     return server
 
