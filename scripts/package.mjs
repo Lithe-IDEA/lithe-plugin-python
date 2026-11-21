@@ -161,20 +161,16 @@ export async function packagePlatforms({ platforms, expectTag, cleanDist = false
   }
   mkdirSync(distDir, { recursive: true });
 
-  const debugpySpec = lock.wheels.debugpy;
-  const tomliSpec = lock.wheels.tomli;
-  const debugpyWheel = await ensureCachedArtifact({
-    cacheDir,
-    filename: debugpySpec.filename,
-    url: debugpySpec.url,
-    expectedSha256: debugpySpec.sha256,
-  });
-  const tomliWheel = await ensureCachedArtifact({
-    cacheDir,
-    filename: tomliSpec.filename,
-    url: tomliSpec.url,
-    expectedSha256: tomliSpec.sha256,
-  });
+  const wheels = new Map();
+  for (const name of ["debugpy", "tomli", "packaging"]) {
+    const spec = lock.wheels[name];
+    wheels.set(name, await ensureCachedArtifact({
+      cacheDir,
+      filename: spec.filename,
+      url: spec.url,
+      expectedSha256: spec.sha256,
+    }));
+  }
 
   const notices = dependencyNotices(ROOT);
   const built = [];
@@ -221,10 +217,11 @@ export async function packagePlatforms({ platforms, expectTag, cleanDist = false
     writeFileSync(noticesDest, notices, "utf8");
     chmodSync(noticesDest, 0o644);
 
-    // Extract debugpy and tomli into vendor/.
     const vendorDir = join(stagePackageDir, "vendor");
-    extractWheelSubtree(debugpyWheel, "debugpy", vendorDir);
-    extractWheelSubtree(tomliWheel, "tomli", vendorDir);
+    for (const [name, wheel] of wheels) {
+      extractWheelSubtree(wheel, name, vendorDir);
+    }
+    extractWheelSubtree(wheels.get("packaging"), `packaging-${lock.wheels.packaging.version}.dist-info/licenses`, vendorDir);
 
     const relZipPath = `dist/${ASSET_PREFIX}-${baseManifest.version}-${platform}.zip`;
     const absZipPath = resolve(ROOT, relZipPath);

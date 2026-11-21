@@ -33,6 +33,8 @@ Python Support v1.0.0 requires Lithe 0.8.9 or later. Lithe 0.8.9 can install the
      - `lithe/build/test`：通过 pytest node ID 精确运行套件或单个用例，也接受 JUnit XML 类名。指定用例时须同时给出套件。运行时推送 `lithe/build/progress`，并产出 `.pytest_cache/lithe-junit.xml` 供 Core 解码。构建请求在排队时即可取消，执行进程的所有权随请求结束。macOS 和 Linux 使用 POSIX 进程组，Windows 使用 Job Object。
      - 顶部「当前文件 → 运行」支持带 `__main__` 入口的脚本和包内 `__main__.py`。`lithe/build/runEntrypoints` 静态发现入口，`lithe/build/prepareRun` 返回启动计划。默认使用项目选定的 Python；指定「Python 解释器覆盖」时，使用宿主解析的显式解释器。
      - `scripts/run_entrypoint.py` 随插件 ZIP 安装，运行时只读。它在宿主管理的进程树内转发解释器覆盖，并检查包入口的实际来源。包名被其他模块遮蔽时给出错误。旧宿主未传界面语言时，入口错误同时提供中英文。
+     - 在「运行/调试配置 → ＋ → Python」手动配置脚本路径或模块名。可设置解释器选项、脚本参数、工作目录和环境变量。运行时沿用项目的 Python 工具链及解释器覆盖设置，支持选用 Conda、uv 和普通虚拟环境。
+     - 构建面板的「依赖」显示所选解释器中已安装的 Python 包版本与依赖关系。展开或重新加载时读取发行包元数据，支持无 pip 的环境。包共享的子树只展开一次，循环依赖以叶节点结束。
      - 同时保留声明式任务 `pip install -r requirements.txt` 与 `mypy`（带诊断 `lineMatcher`）。
    - `uv`（`uv.lock`）：`uv sync`、`uv lock`。
    - `conda`（`environment.yml` / `environment.yaml`）：`conda env update --file environment.yml --prune`。
@@ -70,12 +72,13 @@ Rust SDK 和构建提供者的 `scripts/lithe_rpc.py` 通过 stdio JSON-RPC 2.0 
 
 ### 2. 宿主代记的声明式插件操作（通道：`plugins/io.github.lithe-idea.python-support/host`）
 
-声明式启动的语言服务器子进程、调试适配器和测试发现命令由宿主与 Core 经 `diagnostics.recordPluginOperation` 将唯一终态代记到 `plugins/io.github.lithe-idea.python-support/host`。用户主动取消或停止不记录。
+声明式启动的语言服务器子进程、调试适配器、依赖查询和测试发现命令由宿主与 Core 经 `diagnostics.recordPluginOperation` 将唯一终态代记到 `plugins/io.github.lithe-idea.python-support/host`。用户主动取消或停止不记录。
 
 | `operation` | 声明来源 | 记录方 | 成功事件与级别 | 失败事件与级别 | 可能的 `host.*` 失败类别标识（`code`） |
 | --- | --- | --- | --- | --- | --- |
 | `languageServer/start` | `languageServers[]`（`pyrefly.resolveLaunch` 解析后的 `pyrefly lsp` 进程） | 启动前失败由桌面宿主记录；进入启动后经 `lsp.startServer.startupOperation` 交由 Core 记录唯一终态 | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.planFailed`、`host.executableUnavailable`、`host.launchFailed`、`host.exitedEarly`、`host.initializeFailed`、`host.timedOut` |
 | `debugAdapter/start` | `debugAdapters[]`（`debugpy`） | 桌面宿主（`op` 为调试会话 ID；用户停止与 Core 拒绝建会话不记录） | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.executableUnavailable`、`host.launchFailed`、`host.exitedEarly`、`host.initializeFailed`、`host.timedOut` |
+| `lithe/build/dependencies` | `buildSystems[].dependencies`（读取所选解释器的包元数据） | 桌面宿主 | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.planFailed`、`host.executableUnavailable`、`host.launchFailed`、`host.commandFailed`、`host.timedOut`、`host.outputInvalid` |
 | `lithe/build/discoverTests` | `buildSystems[].test.discoveryCommand`（`pytest --collect-only`） | 桌面宿主 | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.planFailed`、`host.executableUnavailable`、`host.launchFailed`、`host.commandFailed`、`host.timedOut`、`host.outputInvalid` |
 
 ### 3. 上游子进程通道、隐私红线与原生日志文件
@@ -95,11 +98,13 @@ Rust SDK 和构建提供者的 `scripts/lithe_rpc.py` 通过 stdio JSON-RPC 2.0 
 
 | 路径 | 归属与用途 | 生命周期 | 跨 Git Worktree 复用策略 |
 | --- | --- | --- | --- |
-| `.cache/` | `scripts/package.mjs` 下载并经 SHA-256 校验的上游原始归档（`pyrefly` 6 平台压缩包、`debugpy` wheel、`tomli` wheel） | 本地持久化缓存（已被 `.gitignore` 忽略） | **可安全复制复用**（文件名含上游版本与平台，读取前强制校验 `vendor-lock.json` SHA-256；复制到新工作树 `.cache/`，勿跨并发打包共享写） |
+| `.cache/` | `scripts/package.mjs` 下载并经 SHA-256 校验的上游原始归档（`pyrefly` 6 平台压缩包、`debugpy` wheel、`tomli` wheel、`packaging` wheel） | 本地持久化缓存（已被 `.gitignore` 忽略） | **可安全复制复用**（文件名含上游版本与平台，读取前强制校验 `vendor-lock.json` SHA-256；复制到新工作树 `.cache/`，勿跨并发打包共享写） |
 | `backend/target/` | Rust 后端编译输出，包含按平台目标区分的产物 | 随工作树保留，可重新由 Cargo 生成 | 不共享，构建时由固定的 Cargo.lock 和 Rust 目标重建。Cargo 使用全局 registry 与 Git 依赖下载缓存。 |
 | `.artifacts/stage/` | 打包过程中的单平台解包暂存目录 | 每次 `scripts/package.mjs` 按平台重建（`.gitignore` 忽略） | **不可复用**（构建中间产物，毫秒级重建） |
 | `.artifacts/lithe-host/` | `scripts/e2e-host.mjs` 检出的宿主稀疏工作树及其编译产物 | 本地按需保留（`.gitignore` 忽略） | 其内部 `.artifacts/desktop` 在同一操作系统、CPU 架构与相同 `PINNED_CORE_REVISION` 前提下可按宿主规则复制加速，不得跨工作树软链共用；任何运行时会话日志目录（`sessions/<session>/plugins/.../files/`）与状态目录严禁跨工作树复制 |
 | `grammars/python.first-line.json`（插件包内） | 插件的 TextMate 首行元数据。普通文件和按首行识别的脚本都沿用宿主的 `source.python` 高亮 | 构建时随 ZIP 打包，运行时只读，随插件版本更新或卸载 | 由插件源码随包生成，无运行时缓存 |
+| `vendor/packaging/`（插件包内） | 依赖查询用的 PEP 508 解析器，版本和 SHA-256 见 `vendor-lock.json` | 构建阶段解包，运行时只读，随插件更新或卸载 | 按锁定的 wheel 重建 |
+| 依赖查询报告 | 宿主为每次查询在插件的工作区状态目录分配临时文件 | 宿主读取并清理，运行结束后无需保留 | 不复制 |
 | `dist/` | 最终产出的 `python-support-<version>-<platform>.zip` 发布包 | 打包输出（`.gitignore` 忽略） | 按需重新运行 `node scripts/package.mjs` 生成 |
 
 ### 常用命令
@@ -137,5 +142,5 @@ node scripts/e2e-host.mjs --source /path/to/Lithe-IDEA --ref COMPATIBLE_HOST_COM
 ## 许可证（License）
 
 - 插件清单、Rust 后端、脚本、模板、图标与文档采用 [Apache-2.0](LICENSE) 许可协议。
-- 随包分发的第三方开源组件（Pyrefly `1.4.1`、debugpy `1.8.22`、Tomli `2.5.0`，均为 MIT 许可）完整版权声明与许可证全文见 [io.github.lithe-idea.python-support/THIRD-PARTY-NOTICES.txt](io.github.lithe-idea.python-support/THIRD-PARTY-NOTICES.txt) 及包内 `vendor/debugpy/ThirdPartyNotices.txt`。
+- 随包分发的第三方开源组件（Pyrefly `1.4.1`、debugpy `1.8.22`、Tomli `2.5.0`，均为 MIT 许可）完整版权声明与许可证全文见 [io.github.lithe-idea.python-support/THIRD-PARTY-NOTICES.txt](io.github.lithe-idea.python-support/THIRD-PARTY-NOTICES.txt) 及包内 `vendor/debugpy/ThirdPartyNotices.txt`。Packaging `25.0` 采用 Apache-2.0 或 BSD-2-Clause，原始许可证随包分发。
 - Rust 后端的依赖及对应许可证由 `Cargo.lock` 固定，全文随包附在 `RUST-THIRD-PARTY-NOTICES.txt`。

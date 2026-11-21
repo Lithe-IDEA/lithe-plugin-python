@@ -19,6 +19,7 @@
     "languages": 0,
     "outputLinkMatchers": 0,
     "projectGenerators": 0,
+    "runConfigurationTypes": 0,
     "settings": 0,
     "toolDefinitions": 0,
     "toolchainProviders": 0
@@ -543,6 +544,60 @@
           ]
         }
       ],
+      "runConfigurationTypes": [
+        {
+          "id": "python",
+          "displayName": "Python",
+          "description": "Run a Python script or module with the interpreter selected for this project.",
+          "icon": { "path": "icons/python.svg" },
+          "fields": [
+            {
+              "id": "targetKind",
+              "title": "Run target",
+              "kind": "choice",
+              "default": "script",
+              "choices": [
+                { "value": "script", "title": "Script" },
+                { "value": "module", "title": "Module" }
+              ]
+            },
+            {
+              "id": "script",
+              "title": "Script path",
+              "kind": "file",
+              "required": true,
+              "visibleWhen": { "field": "targetKind", "equals": "script" }
+            },
+            {
+              "id": "module",
+              "title": "Module name",
+              "description": "A dotted import name passed to Python with -m.",
+              "kind": "text",
+              "placeholder": "package.module",
+              "required": true,
+              "visibleWhen": { "field": "targetKind", "equals": "module" },
+              "arguments": ["-m", "${value}"]
+            },
+            {
+              "id": "interpreterOptions",
+              "title": "Interpreter options",
+              "description": "Options passed to Python before the script or module.",
+              "kind": "arguments",
+              "placeholder": "-X dev"
+            }
+          ],
+          "arguments": ["${field:interpreterOptions}", "${field:script}", "${field:module}", "${userArguments}"]
+        }
+      ],
+      "dependencies": {
+        "source": "command",
+        "scopes": ["project"],
+        "arguments": ["-E", "-B", "${pluginDir}/scripts/dependencies.py", "${outputFile}"],
+        "output": "outputFile",
+        "decoder": "litheDependencies",
+        "executesProjectCode": true,
+        "mayUseNetwork": false
+      },
       "run": [
         {
           "id": "main",
