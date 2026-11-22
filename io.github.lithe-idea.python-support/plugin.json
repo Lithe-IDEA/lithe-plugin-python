@@ -2,7 +2,7 @@
   "schemaVersion": 0,
   "id": "io.github.lithe-idea.python-support",
   "displayName": "Python Support",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "vendor": {
     "id": "io.github.lithe-idea",
     "displayName": "Lithe Community",
@@ -96,45 +96,30 @@
   ],
   "settings": [
     {
-      "id": "pythonExecutable",
-      "type": "file",
-      "title": "Python executable override",
-      "description": "Explicit path to the Python interpreter for build, run, and pytest commands. Leave empty to resolve automatically from the Python toolchain (.venv, venv, .conda, VIRTUAL_ENV, PATH, or discovered conda / uv / pyenv installations).",
-      "default": "",
-      "effect": "reload",
-      "page": { "languageID": "python" },
-      "section": "Python Interpreter"
-    },
-    {
       "id": "typeCheckingMode",
       "type": "enum",
       "title": "Type checking mode",
-      "description": "Controls Pyrefly's type-checking strictness. Choose auto to enable type checking only in projects with pyrefly.toml or [tool.pyrefly].",
+      "description": "Pyrefly's preset for files no pyrefly.toml or [tool.pyrefly] covers; a project's own Pyrefly config wins. Automatic follows a nearby mypy or Pyright config, else checks as Basic. While Hide type errors is on, no preset shows type errors.",
       "default": "default",
       "options": [
         { "value": "default", "title": "Default" },
-        { "value": "auto", "title": "Automatic (configured projects only)" },
+        { "value": "auto", "title": "Automatic" },
+        { "value": "off", "title": "Off" },
         { "value": "basic", "title": "Basic" },
+        { "value": "legacy", "title": "Legacy" },
         { "value": "strict", "title": "Strict" },
-        { "value": "all", "title": "All" },
-        { "value": "off", "title": "Off" }
+        { "value": "all", "title": "All" }
       ],
       "effect": "immediate",
       "page": { "languageID": "python" },
       "section": "Pyrefly"
     },
     {
-      "id": "displayTypeErrors",
-      "type": "enum",
-      "title": "Display type errors",
-      "description": "Whether Pyrefly publishes type errors in editor diagnostics across all files, only in projects with a Pyrefly config, or limits diagnostics to missing imports.",
-      "default": "force-on",
-      "options": [
-        { "value": "force-on", "title": "Always on" },
-        { "value": "default", "title": "Configured projects only" },
-        { "value": "error-missing-imports", "title": "Missing imports only" },
-        { "value": "force-off", "title": "Off" }
-      ],
+      "id": "disableTypeErrors",
+      "type": "boolean",
+      "title": "Hide type errors",
+      "description": "Hide type errors in every file, including projects with their own Pyrefly config. Hover, go to definition and completion keep working.",
+      "default": false,
       "effect": "immediate",
       "page": { "languageID": "python" },
       "section": "Pyrefly"
@@ -164,25 +149,25 @@
       "section": "Completions"
     },
     {
-      "id": "completeFunctionParens",
-      "type": "boolean",
-      "title": "Complete function parentheses",
-      "description": "Automatically append parentheses when completing a Python function or method call.",
-      "default": false,
-      "effect": "immediate",
-      "page": { "languageID": "python" },
-      "section": "Completions"
-    },
-    {
       "id": "importFormat",
       "type": "enum",
       "title": "Auto-import module path style",
-      "description": "Prefer absolute module paths or package-relative imports when Pyrefly inserts imports.",
+      "description": "Whether Pyrefly writes absolute module paths or package-relative imports when it inserts an import: on accepting an auto-import completion, and in the move-symbol and convert-module code actions. With Auto-import completions off, only those code actions use it.",
       "default": "absolute",
       "options": [
         { "value": "absolute", "title": "Absolute" },
         { "value": "relative", "title": "Relative" }
       ],
+      "effect": "immediate",
+      "page": { "languageID": "python" },
+      "section": "Completions"
+    },
+    {
+      "id": "completeFunctionParens",
+      "type": "boolean",
+      "title": "Complete function parentheses",
+      "description": "Automatically append parentheses when completing a Python function or method call.",
+      "default": false,
       "effect": "immediate",
       "page": { "languageID": "python" },
       "section": "Completions"
@@ -192,8 +177,20 @@
     {
       "id": "language",
       "page": { "languageID": "python" },
-      "keywords": ["Pyrefly", "type checking", "diagnostics", "completions", "preview"],
-      "view": { "function": "settings.preview" }
+      "keywords": [
+        "interpreter", "virtual environment", "venv", "uv", "conda", "pyenv",
+        "Pyrefly", "type checking", "diagnostics", "completions", "preview"
+      ],
+      "view": { "function": "settings.view" }
+    },
+    {
+      "id": "python",
+      "page": { "buildSystemID": "python" },
+      "keywords": [
+        "interpreter", "lookup order", ".venv", "VIRTUAL_ENV", "PATH",
+        ".python-version", "requires-python", "uv", "conda", "pyenv"
+      ],
+      "view": { "function": "settings.view" }
     }
   ],
   "languageServers": [
@@ -209,7 +206,7 @@
         "python": {
           "pyrefly": {
             "typeCheckingMode": "${setting:typeCheckingMode}",
-            "displayTypeErrors": "${setting:displayTypeErrors}",
+            "disableTypeErrors": "${setting:disableTypeErrors}",
             "diagnosticMode": "${setting:diagnosticMode}"
           },
           "analysis": {
@@ -499,7 +496,6 @@
       },
       "invocation": {
         "executables": [
-          { "kind": "setting", "settingID": "pythonExecutable" },
           { "kind": "toolchain", "toolchainID": "python" }
         ],
         "version": {
@@ -516,7 +512,6 @@
           "runtimeArguments": ["-I", "-B"],
           "entry": "scripts/build_provider.py"
         },
-        "initializationOptions": { "pythonExecutable": "${setting:pythonExecutable}" },
         "executesProjectCode": true,
         "mayUseNetwork": false
       },
@@ -915,7 +910,7 @@
           "launch": {
             "kind": "runtime",
             "tool": "python",
-            "minimumVersion": "3.9",
+            "minimumVersion": "3.10",
             "runtimeArguments": ["-I", "-B"],
             "entry": "scripts/debugpy_adapter.py"
           },

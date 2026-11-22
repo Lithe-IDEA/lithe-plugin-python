@@ -33,8 +33,8 @@ impl LaunchResolver {
             enum_setting(settings, "diagnosticMode", &["openFilesOnly", "workspace"]);
         let mut python = json!({
             "pyrefly": {
-                "typeCheckingMode": enum_setting(settings, "typeCheckingMode", &["default", "auto", "basic", "strict", "all", "off"]),
-                "displayTypeErrors": enum_setting(settings, "displayTypeErrors", &["force-on", "default", "error-missing-imports", "force-off"]),
+                "typeCheckingMode": enum_setting(settings, "typeCheckingMode", &["default", "auto", "off", "basic", "legacy", "strict", "all"]),
+                "disableTypeErrors": settings["disableTypeErrors"].as_bool().unwrap_or(false),
                 "diagnosticMode": diagnostic_mode,
             },
             "analysis": {

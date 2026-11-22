@@ -711,7 +711,7 @@ try {
       assert.deepEqual(initOk.result.capabilities.experimental.litheLogging, { version: 0 });
       assert.deepEqual(initOk.result.capabilities.experimental.litheFunctions, {
         version: 0,
-        functions: [{ id: "pyrefly.resolveLaunch" }, { id: "python.inspectEnvironment" }, { id: "settings.preview" }],
+        functions: [{ id: "pyrefly.resolveLaunch" }, { id: "python.inspectEnvironment" }, { id: "settings.view" }],
       });
       assert.deepEqual(initOk.result.capabilities.experimental.litheToolchains, {
         version: 0,
@@ -723,7 +723,7 @@ try {
       const previewEvent = {
         instance: "python-settings-preview",
         surface: { settingRegionID: region.id },
-        settings: { effective: { displayTypeErrors: "force-on", completeFunctionParens: false }, draft: {} },
+        settings: { effective: { typeCheckingMode: "default", completeFunctionParens: false }, draft: {} },
       };
       peer.send({
         jsonrpc: "2.0", id: 21, method: "lithe/function/invoke",
@@ -731,30 +731,49 @@ try {
           params: { ...previewEvent, event: "open", language: "en", width: 640 } },
       });
       const opened = await peer.waitFor((m) => m.id === 21, "Python preview open");
-      const [wide] = opened.result.view;
+      const [interpreterSection, wide] = opened.result.view;
+      assert.equal(interpreterSection.type, "section");
+      assert.deepEqual(interpreterSection.children, [{ type: "tool", tool: "python" }]);
       assert.deepEqual(wide.on, ["resize"]);
       assert.equal(wide.viewBox[2], 640);
-      assert.match(JSON.stringify(wide), /Type error: expected int, got str/);
-      assert.doesNotMatch(JSON.stringify(wide), /greet\(\)|not applied/);
+      assert.match(JSON.stringify(wide), /"text":"bad-argument-type"\},\{"color":"\$textSecondary","text":" · 2 errors"/);
+      assert.doesNotMatch(JSON.stringify(wide), /not applied/);
 
       peer.send({
         jsonrpc: "2.0", id: 22, method: "lithe/function/invoke",
         params: { operationID: "op-preview-draft", functionID: region.view.function,
           params: { ...previewEvent, event: "settings", language: "zh-Hans", width: 360,
             settings: { ...previewEvent.settings, draft: {
-              displayTypeErrors: "force-off", completeFunctionParens: true, importFormat: "relative",
+              disableTypeErrors: true, completeFunctionParens: true, importFormat: "relative",
             } } } },
       });
       const drafted = await peer.waitFor((m) => m.id === 22, "Python preview draft");
-      const [narrow] = drafted.result.view;
+      const [, narrow] = drafted.result.view;
       assert.equal(narrow.viewBox[2], 360);
       assert.ok(narrow.height > wide.height);
-      assert.match(JSON.stringify(narrow), /含未应用的修改/);
-      assert.match(JSON.stringify(narrow), /隐藏类型错误/);
-      assert.match(JSON.stringify(narrow), /from \.utils import greet/);
-      assert.match(JSON.stringify(narrow), /greet\(\)/);
+      const drawn = JSON.stringify(narrow);
+      assert.match(drawn, /含未应用的修改/);
+      assert.match(drawn, /"text":"已隐藏"/);
+      assert.doesNotMatch(drawn, /bad-argument-type/);
+      assert.match(drawn, /"text":"相对导入"/);
+      assert.match(drawn, /补全函数时加上括号/);
+
+      const lookup = pluginManifest.settingRegions.find(({ id }) => id === "python");
+      assert.deepEqual(lookup.page, { buildSystemID: "python" });
+      assert.equal(lookup.view.function, region.view.function);
+      peer.send({
+        jsonrpc: "2.0", id: 23, method: "lithe/function/invoke",
+        params: { operationID: "op-preview-lookup", functionID: lookup.view.function,
+          params: { ...previewEvent, surface: { settingRegionID: lookup.id }, event: "open", language: "en" } },
+      });
+      const lookedUp = await peer.waitFor((m) => m.id === 23, "Python lookup order open");
+      const [toolRow, order] = lookedUp.result.view;
+      assert.deepEqual(toolRow, { type: "tool", tool: "python" });
+      assert.equal(order.id, "python-resolution");
+      assert.equal(order.on, undefined);
+      assert.match(JSON.stringify(order), /Tried first[\s\S]*Global default[\s\S]*Tried last[\s\S]*Pyrefly uses the same interpreter/);
       assert.ok(!peer.allReceived.some((m) =>
-        m.method === "lithe/log" && ["op-preview-open", "op-preview-draft"].includes(m.params?.operationId),
+        m.method === "lithe/log" && ["op-preview-open", "op-preview-draft", "op-preview-lookup"].includes(m.params?.operationId),
       ), "Successful preview events should not produce logs");
 
       // 3. Resolve launch with external tools.python.executable on Unix.
@@ -775,7 +794,7 @@ try {
             temporaryDirectory: tempDir,
             settings: {
               typeCheckingMode: "strict",
-              displayTypeErrors: "force-on",
+              disableTypeErrors: false,
               diagnosticMode: "openFilesOnly",
               autoImportCompletions: true,
               completeFunctionParens: true,
@@ -800,6 +819,8 @@ try {
       assert.deepEqual(resolvedUnixAnswer.arguments, ["lsp"]);
       assert.equal(resolvedUnixAnswer.workspaceConfiguration.python.pythonPath, extPython);
       assert.equal(resolvedUnixAnswer.workspaceConfiguration.python.pyrefly.typeCheckingMode, "strict");
+      assert.equal(resolvedUnixAnswer.workspaceConfiguration.python.pyrefly.disableTypeErrors, false);
+      assert.equal(resolvedUnixAnswer.workspaceConfiguration.python.pyrefly.displayTypeErrors, undefined);
       assert.equal(resolvedUnixAnswer.workspaceConfiguration.python.analysis.completeFunctionParens, true);
 
       // Verify lithe/log operationFinished arrived strictly BEFORE response id=3!
@@ -1752,16 +1773,6 @@ try {
       assert.equal(collision.status, 1);
       assert.match(collision.stderr, /当前包入口被同名模块或包遮蔽/);
 
-      const launcher = join(unpackedPluginDir, "scripts", "run_entrypoint.py");
-      const interpreter = run(pythonCmd, ["-c", "import sys; print(sys.executable)"]).trim();
-      const forwarded = spawnSync(pythonCmd, ["-I", "-B", launcher, "interpreter", interpreter,
-        "-c", "import sys; print(sys.argv[1]); sys.exit(17)", "argument with spaces"], {
-        cwd: wsDir, encoding: "utf8", timeout: 5000, windowsHide: true,
-      });
-      assert.ifError(forwarded.error);
-      assert.equal(forwarded.status, 17, forwarded.stderr);
-      assert.equal(forwarded.stdout.trim(), "argument with spaces");
-
       for (const [id, entrypoint] of [[73, "script:../worker.py"], [74, "script:missing.py"]]) {
         const response = await prepareRun(id, { entrypoint });
         assert.equal(response.error?.code, -32000);
@@ -1948,7 +1959,7 @@ try {
       const expandedPythonConfig = {
         pyrefly: {
           typeCheckingMode: "default",
-          displayTypeErrors: "force-on",
+          disableTypeErrors: false,
           diagnosticMode: "openFilesOnly",
           extraProjectExcludes: [".venv/**"],
         },
@@ -2019,10 +2030,18 @@ try {
     const logDir = join(scratch, "debugpy-logs");
     mkdirSync(logDir, { recursive: true });
 
+    // debugpy 1.8.22 requires Python 3.10. On 3.9 the adapter fails to import
+    // with stderr already closed, so the host must refuse older interpreters.
+    assert.equal(adapter.launch.process.launch.minimumVersion, "3.10");
     const venvPython =
       process.platform === "win32"
         ? join(demoDir, ".venv", "Scripts", "python.exe")
         : join(demoDir, ".venv", "bin", "python3");
+    const version = run(venvPython, ["-I", "-B", "-c", "import sys; print(*sys.version_info[:2])"]).trim().split(" ").map(Number);
+    assert.ok(
+      version[0] > 3 || (version[0] === 3 && version[1] >= 10),
+      `debugpy needs Python 3.10 or later, but ${pythonCmd} is ${version.join(".")}. Set PYTHON to a newer interpreter.`,
+    );
     const args = [
       ...adapter.launch.process.launch.runtimeArguments,
       entryScript,

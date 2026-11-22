@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -27,7 +28,6 @@ import (
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginhost"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/plugininstall"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginservice"
-	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginsettings"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/plugintrust"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/store"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/toolchain"
@@ -134,6 +134,96 @@ func resolvePytestToolForE2E(t *testing.T, ctx context.Context, systemPython str
 		t.Fatalf("pytest is required for the host test; set PYTEST_PYTHON to an interpreter with pytest: %v", err)
 	}
 	return core.BuildTool{Executable: executable}
+}
+
+// pythonInstallationForE2E returns the home without links (sys.prefix) and
+// the version of the Python installation python, for a test to pin. It fails
+// when python is a virtual environment: Core refuses to pin an environment
+// outside the workspace, because its python links back to the interpreter it
+// was made from. Set PYTEST_PYTHON to an installation, such as one from
+// actions/setup-python, uv python install or pyenv.
+func pythonInstallationForE2E(t *testing.T, ctx context.Context, python string) (home, version string) {
+	t.Helper()
+	facts, err := exec.CommandContext(ctx, python, "-c", "import platform, sys; print(sys.prefix); print(platform.python_version()); print(sys.prefix != sys.base_prefix)").Output()
+	if err != nil {
+		t.Fatalf("read the installation of %s: %v", python, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(facts)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("unexpected interpreter facts %q", facts)
+	}
+	if strings.TrimSpace(lines[2]) == "True" {
+		t.Fatalf("%s is a virtual environment; set PYTEST_PYTHON to a Python installation with pytest, since Core refuses to pin an environment outside the workspace", python)
+	}
+	if home, err = filepath.EvalSymlinks(strings.TrimSpace(lines[0])); err != nil {
+		t.Fatal(err)
+	}
+	return home, strings.TrimSpace(lines[1])
+}
+
+// pinPythonForE2E pins the installation at home as the workspace's Python
+// interpreter, as choosing it on the Toolchains page does, and returns a
+// function that removes the pin again. The page keys a pin by the tool
+// definition's own ID. The pin is kept in the workspace's .lithe folder;
+// removing it also removes that folder when the pin created it.
+func pinPythonForE2E(t *testing.T, ctx context.Context, kernel toolchain.Kernel, workspace, home, version string) func() {
+	t.Helper()
+	created := filepath.Join(workspace, ".lithe")
+	if _, err := os.Stat(created); err == nil {
+		created = ""
+	}
+	pin := &core.ToolchainPin{Home: filepath.ToSlash(home), Version: version, Provider: "host:manual"}
+	_, baseline, err := toolchain.SavePin(ctx, kernel, workspace, ".", "python", pin, nil)
+	if err != nil {
+		t.Fatalf("pin the test interpreter: %v", err)
+	}
+	return func() {
+		t.Helper()
+		if _, _, err := toolchain.SavePin(ctx, kernel, workspace, ".", "python", nil, baseline); err != nil {
+			t.Fatalf("remove the test interpreter's pin: %v", err)
+		}
+		if created != "" {
+			if err := os.RemoveAll(created); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// addPythonInstallationForE2E adds home to the machine's Python installations,
+// as adding an installation on the Toolchains page does. Hosts such as 0.8.9
+// probe a pinned home only when discovery or this list finds it, and discovery
+// does not search where a test interpreter usually is (the actions/setup-python
+// tool cache, or a folder passed to uv python install --install-dir).
+func addPythonInstallationForE2E(t *testing.T, ctx context.Context, h *harness, home string) {
+	t.Helper()
+	pages := settingsToolchains{app: h.app}
+	machine, err := pages.LoadScope(ctx, "global")
+	if err != nil {
+		t.Fatalf("read the machine's toolchains: %v", err)
+	}
+	for index := range machine.Tools {
+		tool := &machine.Tools[index]
+		if tool.ID != "python" && !strings.HasSuffix(tool.ID, ":python") {
+			continue
+		}
+		tool.CustomHomes = append(slices.Clone(tool.CustomHomes), filepath.ToSlash(home))
+		if _, err := pages.Save(ctx, machine, []toolchain.Edit{{Tool: tool.ID}}); err != nil {
+			t.Fatalf("add the test interpreter as a Python installation: %v", err)
+		}
+		return
+	}
+	t.Fatal("the Toolchains page lists no Python tool")
+}
+
+// trustProjectCode marks the workspace of the launch request at request, a
+// pointer to a struct, as trusted. Hosts from 0.8.13 on start no language
+// server or build provider that runs project code without it (safe mode);
+// older hosts have no such field and start them anyway.
+func trustProjectCode(request any) {
+	if field := reflect.ValueOf(request).Elem().FieldByName("ProjectCodeAllowed"); field.IsValid() {
+		field.SetBool(true)
+	}
 }
 
 // registeredPythonEnvironments creates isolated external interpreters listed in a
@@ -318,6 +408,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		TemporaryDirectory:      tempDir,
 		Architecture:            core.PluginArchitecture(),
 	}
+	trustProjectCode(&lspDirs)
 	lspPlan, err := kernel.PlanPluginLanguageServer(ctx, normalizedManifest, "python", lspDirs)
 	if err != nil {
 		t.Fatalf("PlanPluginLanguageServer: %v", err)
@@ -514,7 +605,7 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	buildProject := &project{root: workspace}
 	buildProject.trust.codeAllowed.Store(true)
 	buildWsState := t.TempDir()
-	providerClient, err := buildprovider.Start(ctx, service.Backend, pluginbackend.StartRequest{
+	providerRequest := pluginbackend.StartRequest{
 		Manifest:                normalizedManifest,
 		PackageDirectory:        installedDir,
 		PluginID:                pythonSupportPluginID,
@@ -527,7 +618,9 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 		Architecture:            core.PluginArchitecture(),
 		RootURI:                 pythonFileURI(workspace),
 		WorkingDirectory:        workspace,
-	})
+	}
+	trustProjectCode(&providerRequest)
+	providerClient, err := buildprovider.Start(ctx, service.Backend, providerRequest)
 	if err != nil {
 		t.Fatalf("buildprovider.Start(python): %v", err)
 	}
@@ -598,18 +691,8 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	if instance.System.Test == nil || !instance.System.Test.DiscoveryCommand {
 		t.Fatal("installed Python build system did not expose command discovery")
 	}
-	preferences := pluginsettings.New(kernel, appStore.Dir())
-	settings, err := preferences.Load(ctx, instance.Manifest, workspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pythonSetting, err := json.Marshal(pytestTool.Executable)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := preferences.Save(ctx, settings, "global", []core.PluginSettingEdit{{ID: "pythonExecutable", Value: pythonSetting}}, nil); err != nil {
-		t.Fatalf("set the test interpreter: %v", err)
-	}
+	home, version := pythonInstallationForE2E(t, ctx, pytestTool.Executable)
+	unpin := pinPythonForE2E(t, ctx, kernel, workspace, home, version)
 	workbench := &App{kernel: kernel, plugins: service, store: appStore, text: i18n.For(i18n.English)}
 	discoveryOperation := core.NewOperation()
 	discoveryCtx := core.WithOrigin(ctx, core.Origin{Operation: discoveryOperation})
@@ -617,6 +700,8 @@ func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workbench command discovery: %v", err)
 	}
+	// The toolchain checks below resolve the workspace without a pin.
+	unpin()
 	discoveryFiles, err := os.ReadDir(buildStateDirectory(service.Root, workspace, instance))
 	if err != nil || len(discoveryFiles) != 0 {
 		t.Fatalf("discovery left workspace state entries %v (%v)", discoveryFiles, err)

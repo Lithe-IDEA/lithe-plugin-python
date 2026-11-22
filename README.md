@@ -1,149 +1,191 @@
-# Python Support for Lithe (`io.github.lithe-idea.python-support`)
+# Python Support for Lithe
 
-Python language support plugin for Lithe (`schemaVersion: 0`, `pluginAPIVersion: 0`), bundling [Pyrefly](https://github.com/facebook/pyrefly) `1.4.1` for static type checking and LSP navigation and [debugpy](https://github.com/microsoft/debugpy) `1.8.22` for source-level debugging. A Rust backend discovers interpreters and starts the language server. The build integration uses a pytest discovery command and a Python provider for build models, run entries, and test execution.
+为 [Lithe](https://github.com/1lck/Lithe-IDEA) 提供 Python 支持：Pyrefly 代码智能和类型检查；构建窗口里的运行入口、pytest 测试树和已安装包的依赖树；
+uv、conda、Ruff、mypy 任务；debugpy 调试；在「新建项目」里创建带 `.venv` 的 Python 项目；设置页画出各项设置的效果和 Lithe 查找解释器的顺序。
+这是一个**社区插件**，按插件契约 v0 编写，由 `plugin.json`、几个随包的 Python 脚本、项目模板和一个用 Rust SDK 写的后端组成。
+Pyrefly 和 debugpy 随插件包分发，Python 解释器、pytest、uv、conda、Ruff 用你电脑上的。
 
-遵循 Lithe 插件契约 v1（`schemaVersion: 0`），为 Lithe 桌面端（macOS / Windows / Linux）提供开箱即用的 Python 语言支持、宿主工具链驱动的 `Pyrefly` 解释器注入、`.venv` / `.conda` / `conda` / `uv` / `pyenv` 多来源环境发现、动态 `pytest` 测试树收集与执行、`uv` / `conda` / `Ruff` 构建任务、源码级断点调试及新建项目向导。跨平台实现与验证记录详见 [docs/feature-matrix.md](docs/feature-matrix.md)。
+> English: Python support for Lithe — Pyrefly code intelligence and type checking, run entries, a pytest test tree and
+> the installed-package tree in the build window, uv/conda/Ruff/mypy tasks, debugpy debugging, a Python project entry in
+> New Project, and previews on the settings pages. Pyrefly and debugpy ship in the plugin; the interpreter, pytest, uv,
+> conda and Ruff stay your own. Pick the interpreter on Settings › Build, Execution, Deployment › Toolchains.
 
-## 兼容性（Compatibility）
+> **兼容性**：需要 Lithe 桌面端 0.8.9 或更新版本；0.8.10 起还能按 shebang 识别没有后缀的 Python 脚本。
+> 各版本的变化见 [docs/releases](docs/releases)。
 
-Python Support v1.0.0 要求 Lithe 0.8.9 或更新版本。Lithe 0.8.9 支持安装插件并处理 `.py`、`.pyi` 和 `.pyw` 文件。Lithe 0.8.10 起还能按 shebang 识别无后缀 Python 脚本。
+## 功能
 
-Python Support v1.0.0 requires Lithe 0.8.9 or later. Lithe 0.8.9 can install the plugin and work with `.py`, `.pyi`, and `.pyw` files. Lithe 0.8.10 and later also recognize extensionless Python scripts by their shebang.
+| 功能 | 说明 |
+| --- | --- |
+| 代码智能 | 补全、自动导入、跳转定义、悬停、类型诊断，由随包的 [Pyrefly](https://github.com/facebook/pyrefly) 1.4.1 提供 |
+| 识别文件 | `.py`、`.pyi`、`.pyw`；0.8.10 起首行是 Python shebang 的无后缀脚本也按 Python 打开 |
+| 运行 | 工具栏「当前文件」运行带 `if __name__ == "__main__"` 的脚本和包里的 `__main__.py`；构建窗口列出 `[project.scripts]`、Django `manage.py`、FastAPI、Flask 等入口；「运行/调试配置 → ＋ → Python」可以手动配置脚本或模块 |
+| 测试 | `pytest --collect-only` 收集函数、类方法、参数化用例和 doctest，组成测试树；可以运行整个套件或单个用例 |
+| 依赖 | 构建窗口的「依赖」列出所选解释器里已安装的包、版本和依赖关系，不需要 pip |
+| 任务 | `pip install -r requirements.txt`、`mypy`；有 `uv.lock` 时 `uv sync`、`uv lock`；有 `environment.yml` 时 `conda env update`；有 Ruff 配置时 `ruff check`、`ruff format` |
+| 调试 | 随包的 debugpy 1.8.22，支持启动和按地址附加（`host`、`port`、`pathMappings`） |
+| 输出链接 | 终端和运行输出里 Traceback 的 `File "…", line N` 可以点击跳到源码 |
+| 新建项目 | 选解释器、选是否用 venv 或 uv 建 `.venv`、是否加示例代码；创建后项目固定使用所选解释器 |
+| 工具链 | 找到项目的 `.venv` 和电脑上 uv、pyenv、conda、python.org 装的 Python，按 `.python-version` 和 `requires-python` 选版本，见下文“Python 解释器” |
+| 设置预览 | 语言页和构建工具页画出设置的效果和解释器的查找顺序，见下文“设置预览” |
 
----
+## 设置
 
-## 核心能力（Capabilities）
+**插件设置**（「语言与框架 › Python」，也在 设置 → 插件 → Python Support →「设置」），都立即生效：
 
-1. **语言与编辑器基础（`languages: python`）**
-   - 识别 `.py`、`.pyi`、`.pyw`，配置 `#` 行注释与括号/引号自动配对，声明 `pyproject.toml` / `setup.py` / `setup.cfg` / `requirements.txt` / `Pipfile` / `pyrefly.toml` 项目标记及 `.venv` / `venv` / `.conda` 项目依赖目录。
-   - 按 shebang 识别的无后缀脚本同样支持 Python 高亮、注释和 Pyrefly 诊断。
-2. **后端解析的语言服务器启动与解释器自动注入（`backend` + `languageServers: python` / Pyrefly `1.4.1`）**
-   - 「设置 → 语言与框架 → Python」在设置表单上方展示类型诊断和代码补全的示例。修改设置时，预览直接显示草稿效果。
-   - 插件包内的 Rust 后端直接启动 Pyrefly，无需先找到 Python。宿主会传入可用于自动启动的解释器路径，缺失时由 Pyrefly 按自身规则发现项目环境。构建、测试与调试仍用宿主选择的 Python。
-   - 构建期按平台固定版本与 SHA-256 打包 `pyrefly 1.4.1`（Unix：`bin/pyrefly`，Windows：`bin/pyrefly.exe`），每个包也包含同一目标架构的 `bin/lithe-python-backend`（Windows 为 `.exe`）。
-   - `languageServers[0]` 采用 `"launch": {"kind": "backend", "function": "pyrefly.resolveLaunch", "timeoutMilliseconds": 30000}`：根据 `platform.os` 动态返回包内 `bin/pyrefly` 或 `bin/pyrefly.exe` 与 `arguments: ["lsp"]`，合并全部即时设置（`typeCheckingMode`、`displayTypeErrors`、`diagnosticMode`、`autoImportCompletions`、`completeFunctionParens`、`importFormat`）。
-   - 当宿主在调用参数中传入已选定的非项目内解释器 `tools.python.executable`（如外部 `conda`、`uv`、`pyenv` 或系统环境）时，自动注入 `workspaceConfiguration.python.pythonPath`；当 `tools.python` 缺失（未选定或项目内虚拟环境尚未获信任）时优雅省略 `pythonPath`，保留 `pyrefly` 原生 `.venv` / `pyproject.toml` 自动发现且不阻断启动。
-3. **工具链与多环境发现增强（`toolDefinitions: python` + `toolchainProviders: 0`）**
-   - 严格按 Core 4 层优先级解析：项目级显式绑定 → 项目内环境（`.venv` / `venv` / `.conda`，`projectKind: "environment"`，受宿主工作区信任门控并保留字面软链路径）→ 全局设置 → `VIRTUAL_ENV` 与 `PATH`（`python3` / `python`）→ 16 条跨平台自动发现规则（覆盖 `UV_PYTHON_INSTALL_DIR`、`XDG_DATA_HOME`、`PYENV_ROOT`、`CONDA_ENVS_PATH`、`CONDA_PREFIX`、`WORKON_HOME`、`LOCALAPPDATA`、`APPDATA`、Homebrew、macOS Framework、`~/.pyenv`、`~/.local/share/uv`、`*conda*/envs/*`、`miniforge*/envs/*`）。
-   - Rust 提供者读取 conda 环境登记表和安装元数据，以及 uv、pyenv、Poetry、Pipenv 管理的外部环境。项目中的 `.python-version` 选择版本，同一目录的 `pyproject.toml` 限制可选版本。Pipenv 默认环境按完整的 `Pipfile` 路径匹配，并遵守同目录的 Python 版本约束。宿主观察这些输入并在变化后重新查询。
-   - 需要支持 `toolchainProviders: 0` 的 Lithe 桌面端。外部环境的解释器链接若指向环境目录之外，Core 会拒绝将该环境作为提供者候选。常见于以链接方式创建的 Unix Poetry/Pipenv 环境。使用常规可执行文件副本的环境可被发现，项目内 `.venv` 继续使用宿主的信任流程。
-4. **构建、运行与动态 `pytest` 测试树（`buildSystems: 1` 与 `buildProviders: 1`）**
-   - `python` 通过 `test.discoveryCommand` 启动 `python -I -B scripts/discover_tests.py`。宿主使用选定解释器和构建实例目录运行命令，并提供 `${outputFile}`。命令运行 `pytest --collect-only`，汇报函数、类方法和参数化用例的精确选择器。发现为空时写入有效的 `litheTestDiscovery` v0 空列表。选择器或报告超出契约限制时整次发现失败。pytest 缓存与报告位于宿主 `${workspaceStateDir}` 下的本次发现目录，由宿主在操作结束时清理。宿主负责取消并回收整个进程树，收集脚本保留 45 秒的 pytest 超时。
-   - Python 构建提供者 `scripts/build_provider.py` 使用 `python -I -B` 启动，处理以下请求。
-     - `lithe/build/model`：复用 `scripts/build_model.py` 纯 `ast` + `tomllib`（Python 3.9–3.10 自动回退内置 `vendor/tomli`）静态提取 `[project.scripts]`、包 `__main__.py`、顶层 `__main__` 脚本、Django `manage.py`、FastAPI ASGI、Flask WSGI 运行目标（绝不执行用户代码），派生 7 类声明式 `run` 配置；
-     - `lithe/build/test`：通过 pytest node ID 精确运行套件或单个用例，也接受 JUnit XML 类名。指定用例时须同时给出套件。运行时推送 `lithe/build/progress`，并产出 `.pytest_cache/lithe-junit.xml` 供 Core 解码。构建请求在排队时即可取消，执行进程的所有权随请求结束。macOS 和 Linux 使用 POSIX 进程组，Windows 使用 Job Object。
-     - 顶部「当前文件 → 运行」支持带 `__main__` 入口的脚本和包内 `__main__.py`。`lithe/build/runEntrypoints` 静态发现入口，`lithe/build/prepareRun` 返回启动计划。默认使用项目选定的 Python；指定「Python 解释器覆盖」时，使用宿主解析的显式解释器。
-     - `scripts/run_entrypoint.py` 随插件 ZIP 安装，运行时只读。它在宿主管理的进程树内转发解释器覆盖，并检查包入口的实际来源。包名被其他模块遮蔽时给出错误。旧宿主未传界面语言时，入口错误同时提供中英文。
-     - 仅用 `environment.yml` 或 `environment.yaml` 管理 Conda 环境的项目也会识别为 Python 构建实例。
-     - 在「运行/调试配置 → ＋ → Python」手动配置脚本路径或模块名。可设置解释器选项、脚本参数、工作目录和环境变量。运行时沿用项目的 Python 工具链及解释器覆盖设置，支持选用 Conda、uv 和普通虚拟环境。
-     - 构建面板的「依赖」显示所选解释器中已安装的 Python 包版本与依赖关系。展开或重新加载时用 `python -I -B` 读取发行包元数据，跳过用户级 site-packages 及其启动钩子，支持无 pip 的环境。包共享的子树只展开一次，循环依赖以叶节点结束。
-     - 同时保留声明式任务 `pip install -r requirements.txt` 与 `mypy`（带诊断 `lineMatcher`）。
-   - `uv`（`uv.lock`）：`uv sync`、`uv lock`。
-   - `conda`（`environment.yml` / `environment.yaml`）：`conda env update --file environment.yml --prune`。
-   - `ruff`（`ruff.toml` / `.ruff.toml` / `pyproject.toml`）：`ruff check`（带诊断 `lineMatcher`）与 `ruff format`。
-5. **调试器（`debugAdapters: debugpy`）**
-   - 以 `["-I", "-B"]` 隔离参数启动 `scripts/debugpy_adapter.py --log-dir ${logDir}`，双重设置 `PYTHONDONTWRITEBYTECODE=1` 保持已安装插件目录零字节码写入，支持本地 `launch` 与远程 TCP `attach`（`host` / `port` / `pathMappings`）。
-6. **终端 Traceback 链接与新建项目向导（`outputLinkMatchers` & `projectGenerators`）**
-   - 自动识别终端输出中的 `File "...", line N` 并支持跳转源码；新建项目向导支持固定项目级 `python` 解释器（`pinAs: "project"`）及创建 `.venv`（`venv` / `uv`）。
-
----
-
-## 日志接线说明（Structured Logging v2 Wiring）
-
-插件包含包内 Rust SDK 后端、构建提供者（`scripts/build_provider.py`）与声明式贡献，诊断通过 Lithe 结构化日志 v2 规范（Core `rust/logging/README.md`、`shared/plugins/contract/v1/README.md#structured-plugin-diagnostics` 与 `shared/plugins/guides/plugin-logging.md`），**零自建插件日志文件**，已安装插件目录在运行期保持 **100% 只读**。
-
-### 1. 后端与构建 Provider 协议接线（统一通道：`plugins/io.github.lithe-idea.python-support/host`）
-
-Rust SDK 和构建提供者的 `scripts/lithe_rpc.py` 通过 stdio JSON-RPC 2.0 发送结构化诊断，与宿主代记的声明式贡献共用通道 `plugins/io.github.lithe-idea.python-support/host`（见 Core `rust/logging/events/plugins.json`）：
-- **强制协商 `litheLogging` 0**：`initialize` 缺少 `experimental.litheLogging` `versions: [0]` 时立即以 `-32600` 拒绝握手；两种后端的 `stdout` 均只输出 `Content-Length` JSON-RPC 帧。
-- **请求级 `operationId` 关联与时序**：所有 `lithe/log` 通知严格在对应 JSON-RPC 响应帧发出**之前**写入 `stdout`，携带宿主请求传入的 `operationID`（回退为受控请求 ID），确保 Core 将诊断精确关联到活跃操作。
-- **取消不记失败**：收到 `$/cancelRequest` 时停止扫描或终止构建子进程组（POSIX 进程组 / Windows Job Object），返回 `-32800` 且不发送 `operationFinished` 或 `operationFailed`。
-
-| `operation` | 所属进程 | 成功事件与级别 | 降级 / 恢复事件（`WARN`） | 失败事件与级别（`ERROR`） | 受控 `code` 类别标识 |
-| --- | --- | --- | --- | --- | --- |
-| `initialize` | Rust 后端 / `build_provider.py` | 握手由 Core 记录 `plugins.host.protocol.initialized`（`INFO`） | — | 握手失败由 Core / 宿主记录 | 宿主协议错误 |
-| `pyrefly.resolveLaunch` | Rust 后端 | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "invalid_tool_hint"`，`count: 1`）<br>恢复：`plugins.operation.recovery_finished`（`code: "tool_hint_restored"`，`count: 1`） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `invalid_tool_hint`、`tool_hint_restored`、`python.unknownServer`、`internal_error` |
-| `python.inspectEnvironment` | Rust 后端 | **已启用 `suppressSuccessDiagnostics`**（高频只读查询成功不发 `INFO`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidExecutable`、`python.environmentUnavailable`、`internal_error` |
-| `settings.preview` | Rust 后端 | **已启用 `suppressSuccessDiagnostics`**（预览更新成功不发 `INFO`） | — | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `python.preview.unknownRegion`、`sdk.view.invalidEvent`、`internal_error` |
-| `lithe/build/model` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | 降级：`plugins.operation.fallback_selected`（`code: "pyproject_parse_failed"`，`count: 1`）<br>恢复：`plugins.operation.recovery_finished`（`code: "pyproject_restored"`，`count: 1`） | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `pyproject_parse_failed`、`pyproject_restored`、`python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
-| `lithe/build/test` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`；测试断言失败仍属正常协议返回 `exitCode != 0`，失效/越界选择器、进程级超时或解释器缺失才记 `ERROR`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidTestSelector`、`python.staleTestSelector`、`python.pytestTimedOut`、`python.interpreterUnavailable`、`python.projectUnavailable`、`internal_error` |
-| `lithe/build/runEntrypoints` | `build_provider.py` | **已启用 `suppressSuccessDiagnostics`**（打开文件高频静态入口探测成功不发 `INFO`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
-| `lithe/build/prepareRun` | `build_provider.py` | `plugins.operation.finished`（`INFO`，含 `duration_ms` 与 `op`） | — | `plugins.operation.failed`（含 `duration_ms` 与 `code`） | `python.invalidRunEntrypoint`、`python.staleRunEntrypoint`、`python.interpreterUnavailable`、`python.invalidRoot`、`python.projectUnavailable`、`internal_error` |
-| `notification` / `result-encoding` / `shutdown` | `lithe_rpc.py` | — | — | `plugins.operation.failed`（`ERROR`） | `framing_error`、`result_encoding_failed`、`internal_error` |
-
-`toolchains/query` 是高频只读操作，成功由 SDK 返回事实。取消、读取失败、扫描超限与不安全输入通过 `plugin.toolchain.*` 结构化返回。宿主工具链层观察并处理查询及解码失败。协议 v0 的 SDK 无该操作的诊断回调。
-
-### 2. 宿主代记的声明式插件操作（通道：`plugins/io.github.lithe-idea.python-support/host`）
-
-声明式启动的语言服务器子进程、调试适配器、依赖查询和测试发现命令由宿主与 Core 经 `diagnostics.recordPluginOperation` 将唯一终态代记到 `plugins/io.github.lithe-idea.python-support/host`。用户主动取消或停止不记录。
-
-| `operation` | 声明来源 | 记录方 | 成功事件与级别 | 失败事件与级别 | 可能的 `host.*` 失败类别标识（`code`） |
-| --- | --- | --- | --- | --- | --- |
-| `languageServer/start` | `languageServers[]`（`pyrefly.resolveLaunch` 解析后的 `pyrefly lsp` 进程） | 启动前失败由桌面宿主记录；进入启动后经 `lsp.startServer.startupOperation` 交由 Core 记录唯一终态 | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.planFailed`、`host.executableUnavailable`、`host.launchFailed`、`host.exitedEarly`、`host.initializeFailed`、`host.timedOut` |
-| `debugAdapter/start` | `debugAdapters[]`（`debugpy`） | 桌面宿主（`op` 为调试会话 ID；用户停止与 Core 拒绝建会话不记录） | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.executableUnavailable`、`host.launchFailed`、`host.exitedEarly`、`host.initializeFailed`、`host.timedOut` |
-| `lithe/build/dependencies` | `buildSystems[].dependencies`（读取所选解释器的包元数据） | 桌面宿主 | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.planFailed`、`host.executableUnavailable`、`host.launchFailed`、`host.commandFailed`、`host.timedOut`、`host.outputInvalid` |
-| `lithe/build/discoverTests` | `buildSystems[].test.discoveryCommand`（`pytest --collect-only`） | 桌面宿主 | `plugins.operation.finished`（`INFO`，含 `duration_ms`） | `plugins.operation.failed`（`ERROR`，含 `duration_ms` 与 `code`） | `host.planFailed`、`host.executableUnavailable`、`host.launchFailed`、`host.commandFailed`、`host.timedOut`、`host.outputInvalid` |
-
-### 3. 上游子进程通道、隐私红线与原生日志文件
-
-| 组件 / 命令 | v2 结构化通道或原生文件位置 | 级别、限流、脱敏与清理策略 |
+| 设置 | 默认 | 说明 |
 | --- | --- | --- |
-| Rust 后端 / `build_provider.py` | 结构化通道：`plugins/io.github.lithe-idea.python-support/host`<br>未分类 `stderr`：`plugins.host.stderr.received`（`DEBUG`） | **零自建日志文件**；会话启动与握手由 Core 记录 `plugins.host.process.started` / `plugins.host.protocol.initialized` / `plugins.host.session.updated`；未预期异常在 `stderr` 仅输出 `<server-name>: <category> (<ExceptionType>)` 受控短词，**绝不拼接文件路径、命令参数、源码片段、输出内容或环境变量值**。Core 对 `stderr` 按每行 4 KiB 限流并脱敏截断，仅在详细诊断开启时落盘。 |
-| `pyrefly lsp`（语言服务器） | 结构化通道：`plugins/io.github.lithe-idea.python-support/host`（或宿主内置 `lsp/python`） | Core 记录 `plugins.host.process.started`、`plugins.host.protocol.initialized`、`plugins.host.session.updated`；`window/logMessage` 与 `window/showMessage` 保留显式 `ERROR`/`WARN`/`INFO`/`DEBUG` 级别；未分类 `stderr` 经 `plugins.host.stderr.received` 记为 `DEBUG`（仅详细诊断开启时落盘）；详细诊断开启（15 分钟单次到期）时仅接纳 `$/logTrace.message` 摘要，拒绝 `verbose` 载荷。`pyrefly` 不写任何插件内文件。 |
-| `debugpy`（调试适配器与启动器） | 结构化通道：`debug/debugpy`<br>原生日志文件：`sessions/<session>/plugins/io.github.lithe-idea.python-support/files/debugpy.*.log` | 结构化会话事件写入 `debug/debugpy`；上游 `debugpy` 原生日志通过 `--log-dir ${logDir}` 定向写入宿主 `Store.PluginFilesDirectory` 创建的当前会话专属目录（权限 `0700`，逐段校验拒绝软链越界，绝不写插件安装目录或 app bundle），按 `<pid>` 建文件并随宿主日志会话生命周期统一保留与清理。 |
-| `pytest`、构建任务与项目生成 | 测试发现报告（`${outputFile}`）、构建/测试面板流式输出（`lithe/build/progress`）与 JUnit XML（`.pytest_cache/lithe-junit.xml`） | `pytest --collect-only` 的缓存与报告同目录，随宿主发现操作结束清理。宿主可向用户展示失败命令的部分输出。v2 结构化诊断只保存阶段类别和耗时。 |
+| 类型检查模式 | 默认 | Pyrefly 的预设：默认、自动、关闭、基础、宽松、严格、全部。项目有 `pyrefly.toml` 或 `[tool.pyrefly]` 时以项目配置为准；“自动”沿用附近的 mypy 或 Pyright 配置，没有时按“基础” |
+| 隐藏类型错误 | 关 | 所有文件都不显示类型错误，包括有自己 Pyrefly 配置的项目；悬停、跳转、补全照常。开启后类型检查模式选什么都不显示类型错误 |
+| 诊断范围 | 仅打开的文件 | 或者“整个工作区”：没打开的文件也报告错误级别的问题 |
+| 自动导入补全 | 开 | 补全列出还没导入的名字，确认时插入 `import` |
+| 自动导入路径风格 | 绝对导入 | 插入导入时用完整模块路径还是包内相对路径。也用于“移动符号”“转换模块”代码操作；关闭自动导入补全后只有这两个操作用它 |
+| 补全函数括号 | 关 | 补全函数或方法时加上 `()`，光标停在括号里 |
 
----
+## Python 解释器
 
-## 本地构建、缓存与测试（Build, Cache & Verification）
+Pyrefly 分析代码、运行、测试、调试、读取依赖、安装依赖都用同一个解释器。Lithe 按这个顺序找：
 
-### 构建与缓存目录说明（跨工作树复用规则）
+1. **项目环境**：为项目固定的解释器；项目里的 `.venv`、`venv`、`.conda`（项目要先被信任）；项目的 `.python-version` 和
+   `pyproject.toml` 的 `requires-python` 决定选哪个版本。
+2. **全局默认**：全局固定的解释器，其次默认版本。
+3. **自动发现**：`VIRTUAL_ENV`，`PATH` 里的 `python3`、`python`，然后是 uv、pyenv、conda、python.org 装的 Python。
 
-| 路径 | 归属与用途 | 生命周期 | 跨 Git Worktree 复用策略 |
-| --- | --- | --- | --- |
-| `.cache/` | `scripts/package.mjs` 下载并经 SHA-256 校验的上游原始归档（`pyrefly` 6 平台压缩包、`debugpy` wheel、`tomli` wheel、`packaging` wheel） | 本地持久化缓存（已被 `.gitignore` 忽略） | **可安全复制复用**（文件名含上游版本与平台，读取前强制校验 `vendor-lock.json` SHA-256；复制到新工作树 `.cache/`，勿跨并发打包共享写） |
-| `backend/target/` | Rust 后端编译输出，包含按平台目标区分的产物 | 随工作树保留，可重新由 Cargo 生成 | 不共享，构建时由固定的 Cargo.lock 和 Rust 目标重建。Cargo 使用全局 registry 与 Git 依赖下载缓存。 |
-| `.artifacts/stage/` | 打包过程中的单平台解包暂存目录 | 每次 `scripts/package.mjs` 按平台重建（`.gitignore` 忽略） | **不可复用**（构建中间产物，毫秒级重建） |
-| `.artifacts/lithe-host/` | `scripts/e2e-host.mjs` 检出的宿主稀疏工作树及其编译产物 | 本地按需保留（`.gitignore` 忽略） | 其内部 `.artifacts/desktop` 在同一操作系统、CPU 架构与相同 `PINNED_CORE_REVISION` 前提下可按宿主规则复制加速，不得跨工作树软链共用；任何运行时会话日志目录（`sessions/<session>/plugins/.../files/`）与状态目录严禁跨工作树复制 |
-| `grammars/python.first-line.json`（插件包内） | 插件的 TextMate 首行元数据。普通文件和按首行识别的脚本都沿用宿主的 `source.python` 高亮 | 构建时随 ZIP 打包，运行时只读，随插件版本更新或卸载 | 由插件源码随包生成，无运行时缓存 |
-| `vendor/packaging/`（插件包内） | 依赖查询用的 PEP 508 解析器，版本和 SHA-256 见 `vendor-lock.json` | 构建阶段解包，运行时只读，随插件更新或卸载 | 按锁定的 wheel 重建 |
-| 依赖查询报告 | 宿主为每次查询在插件的工作区状态目录分配临时文件 | 宿主读取并清理，运行结束后无需保留 | 不复制 |
-| `dist/` | 最终产出的 `python-support-<version>-<platform>.zip` 发布包 | 打包输出（`.gitignore` 忽略） | 按需重新运行 `node scripts/package.mjs` 生成 |
+换解释器在 **设置 → 构建、执行、部署 → 工具链**：为项目或全局固定一个找到的安装，或者添加其他目录。
+「语言与框架 › Python」顶部那一行显示当前用的解释器，点它也会到工具链页。
 
-### 常用命令
+**目前用不了的解释器**（[#2316](https://github.com/1lck/Lithe-IDEA/issues/2316)）：在 macOS 和 Linux 上，Lithe 拒绝程序链接到安装目录外的
+Python，固定也不行。受影响的有：
 
-打包需要 Node.js 与 Rust 1.87，并由 `backend/Cargo.lock` 固定依赖。SDK 固定到 Core 的 Git 提交。Linux 目标使用 musl，Windows 使用 MSVC 并静态链接 C 运行库，macOS 使用系统链接器。发布使用 CI 的六平台构建矩阵。
+- 建在项目外的虚拟环境：`python -m venv`、`uv venv`、virtualenv 建的，以及 Poetry、Pipenv、virtualenvwrapper 默认建的环境；
+- Homebrew 的 Python，它不会出现在安装列表里。
 
-插件测试使用真实 pytest。将 pytest 安装到 `PYTHON` 对应的环境，或通过 `PYTEST_PYTHON` 指定已安装 pytest 的解释器。
+在此之前请把环境建在项目里：`python3 -m venv .venv` 或 `uv venv`；Poetry 先运行 `poetry config virtualenvs.in-project true`，
+Pipenv 设置 `PIPENV_VENV_IN_PROJECT=1`。也可以固定 uv、pyenv、python.org 装的基础解释器，但那里没有环境里装的包。
+
+1.0.0 的“Python 解释器覆盖”设置在 1.1.0 删除了：它只管运行，Pyrefly 却用工具链里的解释器，两边可能不一致。原来填过的路径不再生效，请在工具链页固定它。
+
+## 设置预览
+
+两块预览由插件后端按界面语言、外观和设置窗口宽度画出。它们用示例代码，不读取打开的项目；截图里的路径和版本是测试数据。
+
+**语言与框架 › Python**：顶部是当前用的 Python 解释器。下面四张卡片各对应一项设置：
+
+| 卡片 | 画出什么 |
+| --- | --- |
+| 类型检查模式 | 示例代码在所选预设下报告哪些错误；隐藏类型错误开启时标为“已隐藏” |
+| 诊断范围 | 一个小项目里哪些文件会被检查 |
+| 自动导入补全 | 补全列出未导入的 `greet`，确认后按绝对或相对路径插入导入；关闭时只补全已导入的名字 |
+| 补全函数括号 | 确认补全后是 `greet()` 还是 `greet` |
+
+<img src="docs/assets/settings-previews/language-zh-Hans-dark.png" alt="Python 语言设置页的解释器和效果预览，深色外观" width="720">
+
+还没应用的修改先画进预览：改动的卡片换成强调色边框，值前加圆点，右上角标出“含未应用的修改”。下图打开了补全函数括号：
+
+<img src="docs/assets/settings-previews/language-en-draft-light.png" alt="还没应用的修改先显示在预览里，英文浅色外观" width="720">
+
+**构建工具 › Python**：画出上面三步查找顺序，以及解释器用在哪些流程。这一页没有设置项，换解释器要到工具链页。
+
+<img src="docs/assets/settings-previews/build-tools-zh-Hans-dark.png" alt="构建工具 › Python 画出 Lithe 查找 Python 解释器的顺序，深色外观" width="720">
+
+## 依赖的程序
+
+| 程序 | 用途 | 来源 |
+| --- | --- | --- |
+| Python 3.9 或更新，调试要 3.10 或更新 | 运行、测试、调试、依赖、读取项目 | 你电脑上的，见上文“Python 解释器” |
+| pytest | 测试树和运行测试 | 装在项目用的解释器里 |
+| mypy | `mypy` 任务 | 装在项目用的解释器里 |
+| uv、conda、ruff | 对应的任务 | `PATH` |
+| Pyrefly 1.4.1 | 代码智能 | 随插件包 |
+| debugpy 1.8.22 | 调试 | 随插件包，由项目用的解释器运行，需要 Python 3.10 或更新 |
+
+安装插件时 Lithe 会列出这些程序和插件需要的权限，确认后才安装。
+
+## 安装
+
+在 **设置 → 插件** 的市场里搜索 Python Support 安装。也可以从 [Releases](https://github.com/Lithe-IDEA/lithe-plugin-python/releases)
+下载对应平台的 `python-support-<版本>-<平台>.zip`（`darwin-arm64`、`darwin-x64`、`windows-x64`、`windows-arm64`、`linux-x64`、`linux-arm64`），
+在 **设置 → 插件** 里点 **从文件安装…**，核对 SHA-256 和权限后确认。
+
+## 工作方式
+
+- 后端用 [Rust 插件 SDK](https://github.com/Lithe-IDEA/Lithe-core-rust/tree/main/shared/plugins/sdk/rust) 编写，回答
+  `pyrefly.resolveLaunch`（启动 Pyrefly 并传入所选解释器）、`settings.view`（两块设置预览）和 `toolchains/query`（读取 conda 登记、uv、pyenv、
+  Poetry、Pipenv 环境和项目的版本要求）。后端不保存状态，也不写文件。
+- 构建提供者 `scripts/build_provider.py` 由所选解释器以 `python -I -B` 启动，回答 `lithe/build/model`、`test`、`runEntrypoints` 和 `prepareRun`。
+  它只用 `ast` 和 `tomllib` 读项目，不执行项目代码。
+- 测试树由 `test.discoveryCommand` 运行 `scripts/discover_tests.py` 得到；报告和 pytest 缓存在 Lithe 分配的目录里，用完由 Lithe 清理。
+- debugpy 按 `debugAdapters` 的声明由 `scripts/debugpy_adapter.py` 启动；新建项目由 `projectGenerators` 声明，模板在 `templates/python/`。
+- 插件目录在运行时保持只读：随包的脚本都以 `-B` 和 `PYTHONDONTWRITEBYTECODE=1` 运行，不写字节码。
+
+## 诊断日志
+
+后端和构建提供者接入 Lithe 的日志协议，每次请求的成败自动记录；设置预览、运行入口探测、环境检查这类频繁的只读请求，成功时不记录。
+插件只在真的降级时上报一次 WARN，恢复后再记一次：
+
+| 类别 | 什么时候 |
+| --- | --- |
+| `invalid_tool_hint` / `tool_hint_restored` | Lithe 传来的解释器不可用，Pyrefly 按自己的规则找环境 / 又可用了 |
+| `pyproject_parse_failed` / `pyproject_restored` | `pyproject.toml` 解析失败，构建模型里少了它声明的入口 / 修好了 |
+
+Pyrefly 和 debugpy 的启动结果由 Lithe 记在插件的日志通道。debugpy 自己的日志写在本次会话的插件目录
+`plugins/io.github.lithe-idea.python-support/files/debugpy.*.log`。程序和测试的输出只显示在运行、调试和构建窗口里，不进诊断日志。
+
+## 本地打包
+
+需要 Node.js 22+、Rust 1.87+ 和对应的 target（`rustup target add`）。上游的 Pyrefly、debugpy、Tomli、Packaging 按 `vendor-lock.json`
+的 SHA-256 下载到 `.cache/`，可以复制到其他工作树复用。
 
 ```bash
-# 打包当前开发平台（例如 macOS Apple Silicon）
-node scripts/package.mjs --platform darwin-arm64
-
-# 本机具备全部六种 Rust 目标和链接器时打包全部平台
-node scripts/package.mjs
-
-# 校验 dist/ 下构建产物的目录安全性、Windows 文件名/大小写兼容性与清单一致性
-node --test --test-timeout=60000 scripts/package/*.test.mjs
-
-# 运行 Rust 规则测试、打包后端协议验证及真实 Pyrefly / pytest / debugpy 工作流
-cargo test --locked --manifest-path backend/Cargo.toml
-node scripts/test.mjs
-
-# 使用 e2e/host/lithe-host.json 固定的桌面主线提交运行完整宿主套件
-node scripts/e2e-host.mjs
-
-# 用同一个 ZIP 检查 0.8.9 能安装插件并正常高亮 .py
-node scripts/e2e-host.mjs --source https://github.com/1lck/Lithe-IDEA.git --ref desktop-v0.8.9 --run '^TestPythonSupportPluginGrammarHighlighting$'
-
-# 也可使用另一个兼容的本地检出和提交
-node scripts/e2e-host.mjs --source /path/to/Lithe-IDEA --ref COMPATIBLE_HOST_COMMIT
+cargo test --locked --manifest-path backend/Cargo.toml       # 后端单元测试
+node scripts/package.mjs --platform darwin-arm64             # 不带 --platform 时打六个平台
+node --test --test-timeout=60000 scripts/package/*.test.mjs  # 核对 dist/ 里的每个包
+PYTEST_PYTHON=/path/to/python node scripts/test.mjs          # 用真实的 Pyrefly、pytest、debugpy 跑插件流程
 ```
 
----
+输出 `dist/python-support-<版本>-<平台>.zip`。`scripts/test.mjs` 需要一个装了 pytest 的解释器：用 `PYTEST_PYTHON` 指定，或装进 `PYTHON`
+（默认 `python3`）。`PYTHON` 要是 3.10 或更新，调试流程要用它建的虚拟环境运行 debugpy。`plugin.json` 的格式见 Rust Core 仓库的
+[插件契约](https://github.com/Lithe-IDEA/Lithe-core-rust/blob/main/shared/plugins/contract/v1/README.md)和
+[构建工具接入指南](https://github.com/Lithe-IDEA/Lithe-core-rust/blob/main/shared/plugins/guides/build-tool-integration.md)。
 
-## 许可证（License）
+## 宿主端到端测试
 
-- 插件清单、Rust 后端、脚本、模板、图标与文档采用 [Apache-2.0](LICENSE) 许可协议。
-- 随包分发的第三方开源组件（Pyrefly `1.4.1`、debugpy `1.8.22`、Tomli `2.5.0`，均为 MIT 许可）完整版权声明与许可证全文见 [io.github.lithe-idea.python-support/THIRD-PARTY-NOTICES.txt](io.github.lithe-idea.python-support/THIRD-PARTY-NOTICES.txt) 及包内 `vendor/debugpy/ThirdPartyNotices.txt`。Packaging `25.0` 采用 Apache-2.0 或 BSD-2-Clause，原始许可证随包分发。
-- Rust 后端的依赖及对应许可证由 `Cargo.lock` 固定，全文随包附在 `RUST-THIRD-PARTY-NOTICES.txt`。
+`e2e/host/` 里的测试用 Lithe 桌面端自己的测试工具安装真实插件包，操作编辑器、构建窗口、调试和设置页。
+`e2e/host/lithe-host.json` 记录测试最后一次通过时的宿主版本，主仓库不读取本仓库。
+
+需要 Node.js 22+、Go、Rust 工具链、`git` 和两个 Python：
+
+- `PATH` 里的 `python3` 要是 3.10 或更新（调试用的 debugpy 需要），并且能用 `--copies` 建虚拟环境。Homebrew（`/opt/homebrew/opt/python@3.x/libexec/bin`）或 python.org 装的都可以；uv 装的独立版本复制出来不能运行，Xcode 自带的是 3.9；
+- `PYTEST_PYTHON` 指向装了 pytest 的真实安装，不能是虚拟环境（固定解释器的测试会固定它，见 #2316）。例如
+  `uv python install 3.12 --install-dir .artifacts/test-python`，再用 `uv pip install --python <它的 python3.12> --break-system-packages pytest`。
+
+```bash
+node scripts/package.mjs --platform darwin-arm64
+export LITHE_TEST_PYTHON_PLUGIN_ARCHIVE="$PWD/dist/python-support-1.1.0-darwin-arm64.zip"
+PYTEST_PYTHON=/path/to/python3.12 node scripts/e2e-host.mjs
+# 用同一个包检查 0.8.9：高亮、当前文件运行、固定解释器、手动运行
+PYTEST_PYTHON=/path/to/python3.12 node scripts/e2e-host.mjs --ref desktop-v0.8.9 \
+  --run '^TestPythonSupportPlugin(GrammarHighlighting|RunCurrentFile(PinnedInterpreter)?|ManualRunAndDependencies)$'
+```
+
+插件包路径要写绝对路径。脚本把宿主检出到 `.artifacts/lithe-host`，复制 `e2e/host/desktop/` 下的测试后运行；`--source`、`--ref`、`--run`
+分别换宿主来源、换宿主版本、只跑部分测试。升级 `revision` 时可能要同步修改测试。
+
+## 功能矩阵
+
+各项能力在各平台上的实现与验收状态见 [docs/feature-matrix.md](docs/feature-matrix.md)，改动插件行为时在同一个 PR 里更新它。
+
+## 发布新版本
+
+1. 修改 `io.github.lithe-idea.python-support/plugin.json` 的 `version`：修复升修订号，加功能升次版本号，特别大的革新才升主版本号。
+   依赖还没发布的宿主能力时照样升次版本号，作为预发布版本发布。写好 `docs/releases/v<版本>.md`，合入 `main`。
+2. 推送同名标签，例如 `git tag v1.1.0 && git push origin v1.1.0`。
+3. `Release` 工作流核对标签与版本，打六个平台的包并发布 Release，说明里附 SHA-256 和 `docs/releases/v<版本>.md`。
+   `release.yml` 的 `PRERELEASE_TAGS` 里的版本标为预发布，目前是 `v0.1.0` 和 `v0.1.1`。
+4. Lithe Store 的自动追踪会为稳定版本开合并请求，合并后用户即可更新。
+
+## 许可
+
+插件本身采用 [Apache-2.0](LICENSE)。随包分发的 Pyrefly 1.4.1、debugpy 1.8.22、Tomli 2.5.0（MIT）和 Packaging 25.0（Apache-2.0 或 BSD-2-Clause）
+的声明见 [THIRD-PARTY-NOTICES.txt](io.github.lithe-idea.python-support/THIRD-PARTY-NOTICES.txt) 和包内 `vendor/debugpy/ThirdPartyNotices.txt`；
+Rust 后端依赖的许可证随包附在 `RUST-THIRD-PARTY-NOTICES.txt`。

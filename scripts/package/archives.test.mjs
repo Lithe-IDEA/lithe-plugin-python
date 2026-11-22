@@ -11,11 +11,19 @@ const baseManifest = JSON.parse(readFileSync(`${PACKAGE_ID}/plugin.json`, "utf8"
 const lock = JSON.parse(readFileSync("vendor-lock.json", "utf8"));
 const version = baseManifest.version;
 
-test("the Python interpreter override is on the Python language page on every platform", () => {
+test("every platform shows the settings views on the Python language and build pages, with no interpreter override", () => {
   for (const platform of Object.keys(lock.pyrefly.platforms)) {
     const manifest = manifestForPlatform(baseManifest, platform, lock);
-    const interpreter = manifest.settings.find(({ id }) => id === "pythonExecutable");
-    assert.deepEqual(interpreter?.page, { languageID: "python" }, platform);
+    assert.deepEqual(
+      manifest.settingRegions.map(({ id, page, view }) => ({ id, page, view: view.function })),
+      [
+        { id: "language", page: { languageID: "python" }, view: "settings.view" },
+        { id: "python", page: { buildSystemID: "python" }, view: "settings.view" },
+      ],
+      platform,
+    );
+    // The interpreter is the python tool's pin on the Toolchains page.
+    assert.equal(manifest.settings.find(({ id }) => id === "pythonExecutable"), undefined, platform);
   }
 });
 
