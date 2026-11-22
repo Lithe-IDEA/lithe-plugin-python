@@ -22,7 +22,8 @@
     "runConfigurationTypes": 0,
     "settings": 0,
     "toolDefinitions": 0,
-    "toolchainProviders": 0
+    "toolchainProviders": 0,
+    "ui": 0
   },
   "requiresTools": ["python"],
   "permissions": [
@@ -32,7 +33,8 @@
     "languageServer.launch",
     "process.build",
     "project.generate",
-    "toolchains.provide"
+    "toolchains.provide",
+    "ui.contribute"
   ],
   "activationEvents": [
     "onBuildSystem:conda",
@@ -184,6 +186,14 @@
       "effect": "immediate",
       "page": { "languageID": "python" },
       "section": "Completions"
+    }
+  ],
+  "settingRegions": [
+    {
+      "id": "language",
+      "page": { "languageID": "python" },
+      "keywords": ["Pyrefly", "type checking", "diagnostics", "completions", "preview"],
+      "view": { "function": "settings.preview" }
     }
   ],
   "languageServers": [
