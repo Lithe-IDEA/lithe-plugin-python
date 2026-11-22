@@ -27,31 +27,22 @@
     }
   },
   "settings": {
-    "pythonExecutable": {
-      "title": "Python 解释器覆盖路径",
-      "description": "显式指定用于构建、运行和 pytest 测试的 Python 解释器路径。留空时自动使用 Python 工具链解析结果（依次查找 .venv、venv、.conda、VIRTUAL_ENV、PATH 与已发现的 conda / uv / pyenv 安装）。"
-    },
     "typeCheckingMode": {
       "title": "类型检查模式",
-      "description": "控制 Pyrefly 类型检查的严格程度；选择“自动”时遵循项目中的 pyrefly.toml 或 pyproject.toml 中的 [tool.pyrefly] 配置。",
+      "description": "Pyrefly 对没有 pyrefly.toml 或 [tool.pyrefly] 的文件使用的预设；项目自己的 Pyrefly 配置优先。“自动”沿用附近的 mypy 或 Pyright 配置，没有时按“基础”检查。开启“隐藏类型错误”后，选哪个预设都不显示类型错误。",
       "options": {
-        "auto": "自动（遵循项目配置）",
+        "default": "默认",
+        "auto": "自动",
         "off": "关闭",
         "basic": "基础",
-        "default": "默认",
+        "legacy": "宽松",
         "strict": "严格",
-        "all": "全部规则"
+        "all": "全部"
       }
     },
-    "displayTypeErrors": {
-      "title": "显示类型错误",
-      "description": "控制 Pyrefly 在所有文件中展示类型错误、仅在含 Pyrefly 配置的项目中展示，或仅报告缺失导入。",
-      "options": {
-        "force-on": "始终开启",
-        "default": "仅已配置项目",
-        "error-missing-imports": "仅报告缺失导入",
-        "force-off": "关闭"
-      }
+    "disableTypeErrors": {
+      "title": "隐藏类型错误",
+      "description": "开启后所有文件都不显示类型错误，包括有自己 Pyrefly 配置的项目；悬停、跳转和补全照常可用。"
     },
     "diagnosticMode": {
       "title": "诊断范围",
@@ -65,26 +56,28 @@
       "title": "自动导入补全",
       "description": "在代码补全中包含尚未导入模块的符号，并在确认补全时自动插入 import 语句。"
     },
-    "completeFunctionParens": {
-      "title": "补全函数括号",
-      "description": "补全 Python 函数或方法调用时自动补齐圆括号。"
-    },
     "importFormat": {
       "title": "自动导入路径风格",
-      "description": "控制 Pyrefly 自动插入导入语句时优先使用绝对模块路径还是包内相对路径。",
+      "description": "Pyrefly 插入导入语句时写绝对模块路径还是包内相对路径：接受自动导入补全时，以及“移动符号”“转换模块”代码操作中。关闭“自动导入补全”后，只有这两种代码操作会用到它。",
       "options": {
         "absolute": "绝对导入",
         "relative": "相对导入"
       }
+    },
+    "completeFunctionParens": {
+      "title": "补全函数括号",
+      "description": "补全 Python 函数或方法调用时自动补齐圆括号。"
     }
   },
   "settingRegions": {
     "language": {
-      "keywords": ["类型检查", "诊断", "代码补全", "效果预览"]
+      "keywords": ["解释器", "虚拟环境", "类型检查", "诊断", "代码补全", "效果预览"]
+    },
+    "python": {
+      "keywords": ["解释器", "查找顺序", "虚拟环境"]
     }
   },
   "sections": {
-    "Python Interpreter": "Python 解释器",
     "Pyrefly": "Pyrefly",
     "Completions": "代码补全"
   }

@@ -4,7 +4,7 @@ mod discovery;
 mod inspect;
 mod pyrefly;
 mod requirements;
-mod settings_preview;
+mod view;
 
 use lithe_plugin_sdk::Backend;
 
@@ -20,11 +20,8 @@ fn main() {
         .expect("the inspect function ID is valid")
         .suppress_success_diagnostics(inspect::FUNCTION)
         .expect("the inspect function is registered")
-        .view(settings_preview::FUNCTION, settings_preview::draw)
-        .expect("the preview function ID is valid")
-        .suppress_success_diagnostics(settings_preview::FUNCTION)
-        .expect("the preview function is registered")
         .toolchain_provider("python", discovery::query)
         .expect("the Python provider ID is valid");
+    view::register(&mut backend).expect("the view function is valid");
     std::process::exit(backend.listen());
 }

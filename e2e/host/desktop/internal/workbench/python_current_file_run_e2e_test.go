@@ -1,8 +1,8 @@
 package workbench
 
 import (
+	"cmp"
 	"context"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,11 +21,14 @@ func TestPythonSupportPluginRunCurrentFile(t *testing.T) {
 	checkPythonCurrentFileRun(t, false)
 }
 
-func TestPythonSupportPluginRunCurrentFileInterpreterOverride(t *testing.T) {
+// TestPythonSupportPluginRunCurrentFilePinnedInterpreter pins another
+// interpreter for the project, as the Toolchains page does, and expects the
+// run to use it over the project's .venv.
+func TestPythonSupportPluginRunCurrentFilePinnedInterpreter(t *testing.T) {
 	checkPythonCurrentFileRun(t, true)
 }
 
-func checkPythonCurrentFileRun(t *testing.T, override bool) {
+func checkPythonCurrentFileRun(t *testing.T, pinned bool) {
 	t.Helper()
 	archive := pythonArchiveForE2E(t)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
@@ -65,36 +68,19 @@ func checkPythonCurrentFileRun(t *testing.T, override bool) {
 	if _, err := trust.Save(ctx, kernel, true, false); err != nil {
 		t.Fatal(err)
 	}
-	wantVenv := venv
-	if override {
-		overrideDir, err := filepath.EvalSymlinks(t.TempDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		wantVenv = filepath.Join(overrideDir, "configured interpreter")
-		if output, err := exec.CommandContext(ctx, python, "-m", "venv", "--without-pip", wantVenv).CombinedOutput(); err != nil {
-			t.Fatalf("create configured environment: %v\n%s", err, output)
-		}
-		configured := filepath.Join(wantVenv, "bin", "python")
-		if runtime.GOOS == "windows" {
-			configured = filepath.Join(wantVenv, "Scripts", "python.exe")
-		}
-		settings, err := json.Marshal(map[string]map[string]string{
-			pythonSupportPluginID: {"pythonExecutable": configured},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(preferences.Dir(), "plugin-settings.json"), settings, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
 	h := newHarnessWithOptions(t, Options{
 		Kernel: kernel, PluginKernel: kernel, PluginRoot: t.TempDir(), Store: preferences,
 		Languages: []string{"en"},
 	})
 	installPythonArchive(t, ctx, h.app.plugins, archive)
 	h.app.reloadPluginLanguages()
+	wantPrefix := venv
+	if pinned {
+		home, version := pythonInstallationForE2E(t, ctx, cmp.Or(os.Getenv("PYTEST_PYTHON"), python))
+		wantPrefix = home
+		addPythonInstallationForE2E(t, ctx, h, home)
+		pinPythonForE2E(t, ctx, kernel, root, home, version)
+	}
 	h.open(root)
 	p := h.app.project
 	if p == nil {
@@ -109,7 +95,11 @@ func checkPythonCurrentFileRun(t *testing.T, override bool) {
 	awaitStateWithin(t, h, 20*time.Second, "the current file to start running", func() bool {
 		for _, notice := range noticeTexts(h.app) {
 			if notice == notRunnable {
-				t.Fatalf("the toolbar rejected the Python entrypoint: %s", notice)
+				var models []string
+				for _, instance := range p.build.instances {
+					models = append(models, instance.BuildSystemID+": "+instance.modelError)
+				}
+				t.Fatalf("the toolbar rejected the Python entrypoint: %s\nbuild models: %q", notice, models)
 			}
 		}
 		return p.runConfigs.selected != ""
@@ -117,8 +107,8 @@ func checkPythonCurrentFileRun(t *testing.T, override bool) {
 	run := awaitProcessRun(t, h, p, "main.py", nil)
 	checkOutput := func(output string) {
 		t.Helper()
-		if !strings.Contains(output, "current file ran") || !strings.Contains(output, wantVenv) {
-			t.Fatalf("expected the program to use Python environment %q:\n%s", wantVenv, output)
+		if !strings.Contains(output, "current file ran") || !strings.Contains(output, wantPrefix) {
+			t.Fatalf("expected the program to run with sys.prefix %q:\n%s", wantPrefix, output)
 		}
 	}
 	checkOutput(run.output.all())

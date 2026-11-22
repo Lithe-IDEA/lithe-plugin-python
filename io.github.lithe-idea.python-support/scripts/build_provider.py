@@ -184,14 +184,10 @@ def create_build_provider_server() -> JsonRpcServer:
     workspace_root_holder: dict[str, Path] = {"root": Path.cwd().resolve()}
     degraded_model_roots: set[str] = set()
     state_lock = threading.Lock()
-    configured_interpreter = False
     locale = ""
 
     def _on_init(params: dict[str, Any]) -> None:
-        nonlocal configured_interpreter, locale
-        initialization = params.get("initializationOptions")
-        if isinstance(initialization, dict):
-            configured_interpreter = bool(initialization.get("pythonExecutable"))
+        nonlocal locale
         if isinstance(params.get("locale"), str):
             locale = params["locale"]
         folders = params.get("workspaceFolders")
@@ -229,11 +225,6 @@ def create_build_provider_server() -> JsonRpcServer:
             raw_exec = tool.get("executable")
             if isinstance(raw_exec, str) and raw_exec.strip():
                 python_exec = raw_exec.strip()
-        options = params.get("options")
-        if isinstance(options, dict):
-            opt_exec = options.get("pythonExecutable")
-            if isinstance(opt_exec, str) and opt_exec.strip():
-                python_exec = opt_exec.strip()
 
         env = dict(os.environ)
         raw_env = params.get("environment")
@@ -421,13 +412,6 @@ def create_build_provider_server() -> JsonRpcServer:
             *_string_args(params.get("optionArguments")),
             *_string_args(launch.get("arguments", params.get("userArguments"))),
         ]
-        if configured_interpreter:
-            tool = params.get("tool")
-            executable = tool.get("executable") if isinstance(tool, dict) else None
-            if not isinstance(executable, str) or not Path(executable).is_absolute():
-                raise PluginError("python.interpreterUnavailable", run_message("interpreter", locale))
-            environment.setdefault("PYTHON_EXECUTABLE", executable)
-            arguments = ["-I", "-B", _ENTRYPOINT_LAUNCHER, "interpreter", executable, *arguments]
         return {
             "executable": {"kind": "toolchain", "value": "python"},
             "arguments": arguments,
