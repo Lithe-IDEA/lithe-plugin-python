@@ -5,11 +5,19 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { readZipEntries } from "../lib/archive.mjs";
 import { backendPath } from "../lib/backend.mjs";
-import { ASSET_PREFIX, PACKAGE_ID } from "../package.mjs";
+import { ASSET_PREFIX, manifestForPlatform, PACKAGE_ID } from "../package.mjs";
 
 const baseManifest = JSON.parse(readFileSync(`${PACKAGE_ID}/plugin.json`, "utf8"));
 const lock = JSON.parse(readFileSync("vendor-lock.json", "utf8"));
 const version = baseManifest.version;
+
+test("the Python interpreter override is on the Python language page on every platform", () => {
+  for (const platform of Object.keys(lock.pyrefly.platforms)) {
+    const manifest = manifestForPlatform(baseManifest, platform, lock);
+    const interpreter = manifest.settings.find(({ id }) => id === "pythonExecutable");
+    assert.deepEqual(interpreter?.page, { languageID: "python" }, platform);
+  }
+});
 
 function checkBackendArchitecture(bytes, platform) {
   const arm = platform.endsWith("-arm64");

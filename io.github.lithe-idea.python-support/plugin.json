@@ -100,7 +100,7 @@
       "description": "Explicit path to the Python interpreter for build, run, and pytest commands. Leave empty to resolve automatically from the Python toolchain (.venv, venv, .conda, VIRTUAL_ENV, PATH, or discovered conda / uv / pyenv installations).",
       "default": "",
       "effect": "reload",
-      "page": { "buildSystemID": "python" },
+      "page": { "languageID": "python" },
       "section": "Python Interpreter"
     },
     {
