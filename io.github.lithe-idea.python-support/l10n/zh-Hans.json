@@ -78,6 +78,11 @@
       }
     }
   },
+  "settingRegions": {
+    "language": {
+      "keywords": ["类型检查", "诊断", "代码补全", "效果预览"]
+    }
+  },
   "sections": {
     "Python Interpreter": "Python 解释器",
     "Pyrefly": "Pyrefly",

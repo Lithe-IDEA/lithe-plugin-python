@@ -3,6 +3,7 @@
   "revision": "645a3aee86e3ee5d6a308defa350678f8048baa8",
   "packages": {
     "./internal/projectgen": "^TestPythonPlugin",
+    "./internal/settingswindow": "^TestPythonPluginSettingsPreview$",
     "./internal/workbench": "^TestPythonSupportPlugin"
   },
   "requiredEnvironment": {

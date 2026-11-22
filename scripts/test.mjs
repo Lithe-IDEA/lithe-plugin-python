@@ -433,6 +433,7 @@ try {
         "settings",
         "toolDefinitions",
         "toolchainProviders",
+        "ui",
       ]);
       for (const [capability, version] of Object.entries(variant.requires)) {
         assert.equal(version, ["buildSystems", "buildProviders"].includes(capability) ? 1 : 0);
@@ -445,6 +446,7 @@ try {
         "process.build",
         "project.generate",
         "toolchains.provide",
+        "ui.contribute",
       ]);
 
       assert.deepEqual(variant.backend, {
@@ -709,12 +711,51 @@ try {
       assert.deepEqual(initOk.result.capabilities.experimental.litheLogging, { version: 0 });
       assert.deepEqual(initOk.result.capabilities.experimental.litheFunctions, {
         version: 0,
-        functions: [{ id: "pyrefly.resolveLaunch" }, { id: "python.inspectEnvironment" }],
+        functions: [{ id: "pyrefly.resolveLaunch" }, { id: "python.inspectEnvironment" }, { id: "settings.preview" }],
       });
       assert.deepEqual(initOk.result.capabilities.experimental.litheToolchains, {
         version: 0,
         providers: ["python"],
       });
+
+      const region = pluginManifest.settingRegions.find(({ id }) => id === "language");
+      assert.deepEqual(region.page, { languageID: "python" });
+      const previewEvent = {
+        instance: "python-settings-preview",
+        surface: { settingRegionID: region.id },
+        settings: { effective: { displayTypeErrors: "force-on", completeFunctionParens: false }, draft: {} },
+      };
+      peer.send({
+        jsonrpc: "2.0", id: 21, method: "lithe/function/invoke",
+        params: { operationID: "op-preview-open", functionID: region.view.function,
+          params: { ...previewEvent, event: "open", language: "en", width: 640 } },
+      });
+      const opened = await peer.waitFor((m) => m.id === 21, "Python preview open");
+      const [wide] = opened.result.view;
+      assert.deepEqual(wide.on, ["resize"]);
+      assert.equal(wide.viewBox[2], 640);
+      assert.match(JSON.stringify(wide), /Type error: expected int, got str/);
+      assert.doesNotMatch(JSON.stringify(wide), /greet\(\)|not applied/);
+
+      peer.send({
+        jsonrpc: "2.0", id: 22, method: "lithe/function/invoke",
+        params: { operationID: "op-preview-draft", functionID: region.view.function,
+          params: { ...previewEvent, event: "settings", language: "zh-Hans", width: 360,
+            settings: { ...previewEvent.settings, draft: {
+              displayTypeErrors: "force-off", completeFunctionParens: true, importFormat: "relative",
+            } } } },
+      });
+      const drafted = await peer.waitFor((m) => m.id === 22, "Python preview draft");
+      const [narrow] = drafted.result.view;
+      assert.equal(narrow.viewBox[2], 360);
+      assert.ok(narrow.height > wide.height);
+      assert.match(JSON.stringify(narrow), /含未应用的修改/);
+      assert.match(JSON.stringify(narrow), /隐藏类型错误/);
+      assert.match(JSON.stringify(narrow), /from \.utils import greet/);
+      assert.match(JSON.stringify(narrow), /greet\(\)/);
+      assert.ok(!peer.allReceived.some((m) =>
+        m.method === "lithe/log" && ["op-preview-open", "op-preview-draft"].includes(m.params?.operationId),
+      ), "Successful preview events should not produce logs");
 
       // 3. Resolve launch with external tools.python.executable on Unix.
       peer.send({
