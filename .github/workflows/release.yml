@@ -82,7 +82,7 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          PRERELEASE_TAGS: v0.1.0 v0.1.1
+          PRERELEASE_TAGS: v0.1.0 v0.1.1 v1.2.0
         run: |
           release_flags=()
           installation='Lithe Store 会在收录后提供此版本。打开 设置 → 插件 → 插件市场，搜索 Python Support。'

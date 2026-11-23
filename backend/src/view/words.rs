@@ -115,7 +115,7 @@ const ZH: Words = Words {
     off: "关",
 
     interpreter_title: "Python 解释器",
-    interpreter_info: "Pyrefly 分析代码和调试用这个解释器，Pyrefly 从它的 site-packages 解析第三方库；没有设置「Python 解释器覆盖路径」时，构建、运行、pytest 和安装依赖也用它。点击这一行，到「工具链」页为项目或全局选择 .venv、uv、conda、pyenv 等环境，或添加其他目录。",
+    interpreter_info: "Pyrefly 分析代码和调试用这个解释器，Pyrefly 从它的 site-packages 解析第三方库；没有设置「Python 解释器覆盖路径」时，构建、运行、pytest 和安装依赖也用它。点击这一行，在下拉菜单里为项目或全局选择 .venv、uv、conda、pyenv、Poetry、Pipenv、Hatch 等环境，或添加其他目录；菜单底部也能打开「工具链」页。",
     override_banner: override_banner_zh,
 
     mode_title: "类型检查模式",
@@ -207,7 +207,7 @@ const EN: Words = Words {
     off: "Off",
 
     interpreter_title: "Python interpreter",
-    interpreter_info: "Pyrefly analyzes the code and Lithe debugs with this interpreter; Pyrefly resolves third-party imports from its site-packages. Unless Python executable override is set, Lithe also builds, runs, tests and installs packages with it. Choose the row to pick a .venv, uv, conda or pyenv environment, or another directory, for the project or for all projects on the Toolchains page.",
+    interpreter_info: "Pyrefly analyzes the code and Lithe debugs with this interpreter; Pyrefly resolves third-party imports from its site-packages. Unless Python executable override is set, Lithe also builds, runs, tests and installs packages with it. Choose the row to pick a .venv, uv, conda, pyenv, Poetry, Pipenv or Hatch environment, or another directory, for the project or for all projects; the menu also opens the Toolchains page.",
     override_banner: override_banner_en,
 
     mode_title: "Type checking mode",

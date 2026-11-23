@@ -138,9 +138,9 @@ func resolvePytestToolForE2E(t *testing.T, ctx context.Context, systemPython str
 
 // pythonInstallationForE2E returns the home without links (sys.prefix) and
 // the version of the Python installation python, for a test to pin. It fails
-// when python is a virtual environment: Core refuses to pin an environment
-// outside the workspace, because its python links back to the interpreter it
-// was made from. Set PYTEST_PYTHON to an installation, such as one from
+// when python is a virtual environment, so that the pinned installation case
+// stays apart from the pinned environment case, which makes its own
+// environment. Set PYTEST_PYTHON to an installation, such as one from
 // actions/setup-python, uv python install or pyenv.
 func pythonInstallationForE2E(t *testing.T, ctx context.Context, python string) (home, version string) {
 	t.Helper()
@@ -153,12 +153,37 @@ func pythonInstallationForE2E(t *testing.T, ctx context.Context, python string) 
 		t.Fatalf("unexpected interpreter facts %q", facts)
 	}
 	if strings.TrimSpace(lines[2]) == "True" {
-		t.Fatalf("%s is a virtual environment; set PYTEST_PYTHON to a Python installation with pytest, since Core refuses to pin an environment outside the workspace", python)
+		t.Fatalf("%s is a virtual environment; set PYTEST_PYTHON to a Python installation with pytest", python)
 	}
 	if home, err = filepath.EvalSymlinks(strings.TrimSpace(lines[0])); err != nil {
 		t.Fatal(err)
 	}
 	return home, strings.TrimSpace(lines[1])
+}
+
+// externalPythonEnvironmentForE2E makes a virtual environment from python in a
+// directory outside any workspace and returns its home and version. On macOS
+// and Linux the environment's python is a link to python's own executable,
+// outside the environment.
+func externalPythonEnvironmentForE2E(t *testing.T, ctx context.Context, python string) (home, version string) {
+	t.Helper()
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home = filepath.Join(parent, "external environment")
+	if output, err := exec.CommandContext(ctx, python, "-m", "venv", "--without-pip", home).CombinedOutput(); err != nil {
+		t.Fatalf("create the external environment: %v\n%s", err, output)
+	}
+	executable := filepath.Join(home, "bin", "python")
+	if runtime.GOOS == "windows" {
+		executable = filepath.Join(home, "Scripts", "python.exe")
+	}
+	output, err := exec.CommandContext(ctx, executable, "-c", "import platform; print(platform.python_version())").Output()
+	if err != nil {
+		t.Fatalf("read the version of %s: %v", executable, err)
+	}
+	return home, strings.TrimSpace(string(output))
 }
 
 // pinPythonForE2E pins the installation at home as the workspace's Python
