@@ -11,7 +11,7 @@ const baseManifest = JSON.parse(readFileSync(`${PACKAGE_ID}/plugin.json`, "utf8"
 const lock = JSON.parse(readFileSync("vendor-lock.json", "utf8"));
 const version = baseManifest.version;
 
-test("every platform shows the settings views on the Python language and build pages, with no interpreter override", () => {
+test("every platform shows the settings views and the interpreter override on the Python pages", () => {
   for (const platform of Object.keys(lock.pyrefly.platforms)) {
     const manifest = manifestForPlatform(baseManifest, platform, lock);
     assert.deepEqual(
@@ -22,8 +22,8 @@ test("every platform shows the settings views on the Python language and build p
       ],
       platform,
     );
-    // The interpreter is the python tool's pin on the Toolchains page.
-    assert.equal(manifest.settings.find(({ id }) => id === "pythonExecutable"), undefined, platform);
+    const interpreter = manifest.settings.find(({ id }) => id === "pythonExecutable");
+    assert.deepEqual(interpreter?.page, { languageID: "python" }, platform);
   }
 });
 

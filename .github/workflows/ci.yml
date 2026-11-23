@@ -116,7 +116,7 @@ jobs:
       - name: Install pytest for the host suite
         run: python -m pip install --disable-pip-version-check pytest
       - name: Verify Python highlighting, run configurations, and dependencies on Lithe 0.8.9
-        run: node scripts/e2e-host.mjs --ref 4d1b88f03f243356c855299464baa2647cc57226 --run '^TestPythonSupportPlugin(GrammarHighlighting|RunCurrentFile(PinnedInterpreter)?|ManualRunAndDependencies)$'
+        run: node scripts/e2e-host.mjs --ref 4d1b88f03f243356c855299464baa2647cc57226 --run '^TestPythonSupportPlugin(GrammarHighlighting|RunCurrentFile(InterpreterOverride|PinnedInterpreter)?|ManualRunAndDependencies)$'
       - name: Run the full Python host suite on the pinned desktop
         env:
           GOFLAGS: -tags=vivahead

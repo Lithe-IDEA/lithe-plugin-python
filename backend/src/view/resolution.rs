@@ -4,8 +4,11 @@
 //! The steps follow `toolDefinitions[python].invocation.executables` in
 //! `plugin.json`: what the Toolchains page sets for the project and the
 //! environments in it, then what it sets for every project, then the
-//! automatic lookup. The view sees the plugin's settings only, not the
-//! Toolchains page, so it shows the order; the toolchain row above it shows
+//! automatic lookup. Above them stands the `pythonExecutable` override,
+//! which `buildSystems[python].invocation.executables` tries before the
+//! lookup, so it decides build, run and pytest but not Pyrefly or debugging.
+//! The view sees the plugin's settings only, not the Toolchains page, so it
+//! shows the order and the override path; the toolchain row above it shows
 //! the interpreter found.
 //!
 //! The region sits in the build system page's detail pane, 344 points wide
@@ -36,8 +39,10 @@ const STEP_GAP: f64 = 10.0;
 const TITLE_MIDDLE: f64 = 17.0;
 /// The left edge of a step's lines, and their room on its right.
 const LINE_X: f64 = 12.0;
+/// The top of the first step, under the override card.
+const STEPS_Y: f64 = HEADER + STEP_H + STEP_GAP;
 /// The top of the Pyrefly card, after the three steps.
-const PYREFLY_Y: f64 = HEADER + 3.0 * (STEP_H + STEP_GAP);
+const PYREFLY_Y: f64 = STEPS_Y + 3.0 * (STEP_H + STEP_GAP);
 /// The top of the row of what the interpreter is used for.
 const USES_Y: f64 = PYREFLY_Y + STEP_H + 14.0;
 pub const HEIGHT: f64 = USES_Y + 22.0;
@@ -51,9 +56,10 @@ struct Step<'a> {
 }
 
 /// The diagram for a view `width` points wide, or for the smallest settings
-/// window when the host reports no width. A host that reports it sends
-/// `resize` with the new width, and the scene is drawn again for it.
-pub fn canvas(words: &Words, width: Option<f64>) -> Value {
+/// window when the host reports no width, with the override path when it is
+/// set. A host that reports the width sends `resize` with the new width, and
+/// the scene is drawn again for it.
+pub fn canvas(words: &Words, override_path: Option<&str>, width: Option<f64>) -> Value {
     let scene_w = width.unwrap_or(DEFAULT_WIDTH).max(MIN_WIDTH);
     let step_w = scene_w - STEP_X;
     let steps = [
@@ -77,9 +83,12 @@ pub fn canvas(words: &Words, width: Option<f64>) -> Value {
         },
     ];
 
-    let mut nodes = vec![text(0.0, 17.0, words.resolution_title, "strong")];
+    let mut nodes = vec![
+        text(0.0, 17.0, words.resolution_title, "strong"),
+        override_card(words, override_path, step_w),
+    ];
     for (index, step) in steps.iter().enumerate() {
-        let y = HEADER + index as f64 * (STEP_H + STEP_GAP);
+        let y = STEPS_Y + index as f64 * (STEP_H + STEP_GAP);
         if index > 0 {
             // The rail joins the dots.
             let above = y - STEP_GAP - STEP_H + TITLE_MIDDLE + DOT / 2.0 + 4.0;
@@ -93,7 +102,7 @@ pub fn canvas(words: &Words, width: Option<f64>) -> Value {
         nodes.push(draw(y, index + 1, step, step_w));
     }
     nodes.push(pyrefly(words, step_w));
-    nodes.extend(uses(words).0);
+    nodes.extend(uses(words, override_path.is_some()).0);
     let mut canvas = json!({
         "type": "canvas",
         "id": CANVAS_ID,
@@ -144,8 +153,60 @@ fn draw(y: f64, number: usize, step: &Step, step_w: f64) -> Node {
     )
 }
 
-/// A card's two lines of detail, in a card `card_w` wide.
-fn lines(lines: &[&str; 2], card_w: f64) -> Vec<Node> {
+/// The override path, off the rail above the lookup: dashed while empty, and
+/// framed like the first step with the path while set, since build, run and
+/// pytest then take it before any step.
+fn override_card(words: &Words, path: Option<&str>, step_w: f64) -> Node {
+    let (chip, fill, ink) = match path {
+        Some(_) => (words.override_set, token("$selection"), token("$text")),
+        None => (
+            words.override_unset,
+            token("$badge"),
+            token("$textSecondary"),
+        ),
+    };
+    let (_, chip_w) = pill(0.0, 0.0, chip, fill.clone(), ink.clone());
+    let chip_x = step_w - 10.0 - chip_w;
+    let frame = rect(0.0, 0.0, step_w, STEP_H).radius(8.0);
+    let frame = match path {
+        Some(_) => frame.fill(token("$surface")).stroke(token("$line"), 1.0),
+        None => frame.stroke(token("$line"), 1.0).dash(&[4.0, 3.0]),
+    };
+    let mut card = vec![
+        frame,
+        text(LINE_X, TITLE_MIDDLE + 4.5, words.override_title, "strong")
+            .max_width(chip_x - LINE_X - 10.0),
+        pill(chip_x, TITLE_MIDDLE - 10.0, chip, fill, ink).0,
+    ];
+    match path {
+        Some(path) => {
+            card.push(
+                text(LINE_X, 40.0, &tail(path, step_w - 2.0 * LINE_X), "caption")
+                    .color(token("$text"))
+                    .max_width(step_w - 2.0 * LINE_X),
+            );
+            card.extend(lines(&["", words.override_set_detail], step_w).pop());
+        }
+        None => card.extend(lines(&words.override_unset_detail, step_w)),
+    }
+    group(STEP_X, HEADER, card)
+}
+
+/// The end of `path` that fits `room`, after an ellipsis when it is cut:
+/// the interpreter's name and its environment are at the end.
+fn tail(path: &str, room: f64) -> String {
+    if text_width(path, CAPTION) <= room {
+        return path.to_string();
+    }
+    let chars: Vec<char> = path.chars().collect();
+    (1..chars.len())
+        .map(|start| format!("…{}", chars[start..].iter().collect::<String>()))
+        .find(|cut| text_width(cut, CAPTION) <= room)
+        .unwrap_or_else(|| "…".into())
+}
+
+/// A card's lines of detail, at most two, in a card `card_w` wide.
+fn lines(lines: &[&str], card_w: f64) -> Vec<Node> {
     lines
         .iter()
         .zip([40.0, 55.0])
@@ -199,14 +260,18 @@ fn pyrefly(words: &Words, step_w: f64) -> Node {
     )
 }
 
-/// What Lithe uses the interpreter for, after the cards, and where the row
-/// ends.
-fn uses(words: &Words) -> (Vec<Node>, f64) {
+/// What Lithe uses the interpreter the lookup finds for, after the cards, and
+/// where the row ends. While the override path is set, it takes run, test
+/// and install.
+fn uses(words: &Words, overridden: bool) -> (Vec<Node>, f64) {
     let mut nodes =
         vec![text(0.0, USES_Y + 14.0, words.used_for, "caption").color(token("$textMuted"))];
     let mut x = text_width(words.used_for, CAPTION) + 8.0;
     let mut end = x;
-    for word in words.uses {
+    for (index, word) in words.uses.iter().enumerate() {
+        if overridden && [1, 2, 4].contains(&index) {
+            continue;
+        }
         let (chip, width) = pill(x, USES_Y, word, token("$badge"), token("$textSecondary"));
         nodes.push(chip);
         end = x + width;
@@ -222,10 +287,25 @@ mod tests {
     use crate::view::words;
 
     #[test]
+    fn a_long_override_path_keeps_its_end() {
+        let path =
+            "/Users/someone/projects/a-very-long-project-name/.venv-with-a-long-name/bin/python3";
+        let cut = tail(path, 200.0);
+        assert!(
+            cut.starts_with('…') && cut.ends_with("/bin/python3"),
+            "{cut}"
+        );
+        assert!(text_width(&cut, CAPTION) <= 200.0);
+        assert_eq!(tail("/usr/bin/python3", 200.0), "/usr/bin/python3");
+    }
+
+    #[test]
     fn the_row_of_uses_fits_the_narrowest_scene_in_both_languages() {
         for language in ["en", "zh-Hans"] {
-            let (_, end) = uses(words::for_language(language));
-            assert!(end <= MIN_WIDTH, "{language}: {end}");
+            for overridden in [false, true] {
+                let (_, end) = uses(words::for_language(language), overridden);
+                assert!(end <= MIN_WIDTH, "{language}: {end}");
+            }
         }
     }
 
@@ -239,6 +319,8 @@ mod tests {
                 w.step_global_detail,
                 w.step_automatic_detail,
                 w.pyrefly_detail,
+                w.override_unset_detail,
+                [w.override_set_detail; 2],
             ]
             .concat()
             {
@@ -247,6 +329,18 @@ mod tests {
             }
             let width = text_width(w.pyrefly_title, STRONG);
             assert!(width <= room, "{language}: {} ({width})", w.pyrefly_title);
+            // The override title keeps its room beside the wider chip.
+            let chip = [w.override_set, w.override_unset]
+                .map(|chip| text_width(chip, CAPTION) + 16.0)
+                .into_iter()
+                .fold(0.0, f64::max);
+            let width = text_width(w.override_title, STRONG);
+            let room = MIN_WIDTH - STEP_X - 10.0 - chip - LINE_X - 10.0;
+            assert!(
+                width <= room,
+                "{language}: {} ({width} of {room})",
+                w.override_title
+            );
             let width = text_width(w.resolution_title, STRONG);
             assert!(
                 width <= MIN_WIDTH,

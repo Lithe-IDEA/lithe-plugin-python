@@ -744,16 +744,19 @@ try {
         params: { operationID: "op-preview-draft", functionID: region.view.function,
           params: { ...previewEvent, event: "settings", language: "zh-Hans", width: 360,
             settings: { ...previewEvent.settings, draft: {
-              disableTypeErrors: true, completeFunctionParens: true, importFormat: "relative",
+              displayTypeErrors: "force-off", completeFunctionParens: true, importFormat: "relative",
+              pythonExecutable: "/opt/python/bin/python3",
             } } } },
       });
       const drafted = await peer.waitFor((m) => m.id === 22, "Python preview draft");
-      const [, narrow] = drafted.result.view;
+      const [draftSection, narrow] = drafted.result.view;
+      assert.equal(draftSection.children[1].type, "banner");
+      assert.match(draftSection.children[1].text, /\/opt\/python\/bin\/python3/);
       assert.equal(narrow.viewBox[2], 360);
       assert.ok(narrow.height > wide.height);
       const drawn = JSON.stringify(narrow);
       assert.match(drawn, /含未应用的修改/);
-      assert.match(drawn, /"text":"已隐藏"/);
+      assert.match(drawn, /「显示类型错误」已关闭/);
       assert.doesNotMatch(drawn, /bad-argument-type/);
       assert.match(drawn, /"text":"相对导入"/);
       assert.match(drawn, /补全函数时加上括号/);
@@ -771,7 +774,7 @@ try {
       assert.deepEqual(toolRow, { type: "tool", tool: "python" });
       assert.equal(order.id, "python-resolution");
       assert.equal(order.on, undefined);
-      assert.match(JSON.stringify(order), /Tried first[\s\S]*Global default[\s\S]*Tried last[\s\S]*Pyrefly uses the same interpreter/);
+      assert.match(JSON.stringify(order), /Python executable override[\s\S]*Not set[\s\S]*Tried first[\s\S]*Global default[\s\S]*Tried last[\s\S]*Pyrefly uses the interpreter found/);
       assert.ok(!peer.allReceived.some((m) =>
         m.method === "lithe/log" && ["op-preview-open", "op-preview-draft", "op-preview-lookup"].includes(m.params?.operationId),
       ), "Successful preview events should not produce logs");
@@ -794,7 +797,7 @@ try {
             temporaryDirectory: tempDir,
             settings: {
               typeCheckingMode: "strict",
-              disableTypeErrors: false,
+              displayTypeErrors: "force-on",
               diagnosticMode: "openFilesOnly",
               autoImportCompletions: true,
               completeFunctionParens: true,
@@ -818,6 +821,8 @@ try {
       });
       assert.deepEqual(resolvedUnixAnswer.arguments, ["lsp"]);
       assert.equal(resolvedUnixAnswer.workspaceConfiguration.python.pythonPath, extPython);
+      // Pyrefly 1.4.1 lets typeCheckingMode and disableTypeErrors win over the
+      // deprecated displayTypeErrors, so the answer sends only the new pair.
       assert.equal(resolvedUnixAnswer.workspaceConfiguration.python.pyrefly.typeCheckingMode, "strict");
       assert.equal(resolvedUnixAnswer.workspaceConfiguration.python.pyrefly.disableTypeErrors, false);
       assert.equal(resolvedUnixAnswer.workspaceConfiguration.python.pyrefly.displayTypeErrors, undefined);
@@ -1772,6 +1777,16 @@ try {
       assert.equal(collision.stdout, "", "a shadowed entrypoint must not start a different file");
       assert.equal(collision.status, 1);
       assert.match(collision.stderr, /当前包入口被同名模块或包遮蔽/);
+
+      const launcher = join(unpackedPluginDir, "scripts", "run_entrypoint.py");
+      const interpreter = run(pythonCmd, ["-c", "import sys; print(sys.executable)"]).trim();
+      const forwarded = spawnSync(pythonCmd, ["-I", "-B", launcher, "interpreter", interpreter,
+        "-c", "import sys; print(sys.argv[1]); sys.exit(17)", "argument with spaces"], {
+        cwd: wsDir, encoding: "utf8", timeout: 5000, windowsHide: true,
+      });
+      assert.ifError(forwarded.error);
+      assert.equal(forwarded.status, 17, forwarded.stderr);
+      assert.equal(forwarded.stdout.trim(), "argument with spaces");
 
       for (const [id, entrypoint] of [[73, "script:../worker.py"], [74, "script:missing.py"]]) {
         const response = await prepareRun(id, { entrypoint });
