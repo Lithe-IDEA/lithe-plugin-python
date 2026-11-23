@@ -1,5 +1,6 @@
 //! Produces the packaged Pyrefly launch and its settings using the host's interpreter hint.
 
+use crate::type_errors::Display;
 use lithe_plugin_sdk::{Context, FunctionError, PluginError};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -31,10 +32,22 @@ impl LaunchResolver {
         let settings = &params["settings"];
         let diagnostic_mode =
             enum_setting(settings, "diagnosticMode", &["openFilesOnly", "workspace"]);
+        let preset = enum_setting(
+            settings,
+            "typeCheckingMode",
+            &["default", "auto", "off", "basic", "legacy", "strict", "all"],
+        );
+        let display = Display::parse(enum_setting(
+            settings,
+            "displayTypeErrors",
+            &Display::VALUES,
+        ))
+        .expect("a declared value parses");
+        let (preset, disabled) = display.pyrefly(preset);
         let mut python = json!({
             "pyrefly": {
-                "typeCheckingMode": enum_setting(settings, "typeCheckingMode", &["default", "auto", "off", "basic", "legacy", "strict", "all"]),
-                "disableTypeErrors": settings["disableTypeErrors"].as_bool().unwrap_or(false),
+                "typeCheckingMode": preset,
+                "disableTypeErrors": disabled,
                 "diagnosticMode": diagnostic_mode,
             },
             "analysis": {

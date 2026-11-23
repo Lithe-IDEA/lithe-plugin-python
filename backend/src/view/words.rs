@@ -17,15 +17,20 @@ pub struct Words {
 
     pub interpreter_title: &'static str,
     pub interpreter_info: &'static str,
+    /// The banner under the interpreter row while the override path is set.
+    pub override_banner: fn(&str) -> String,
 
     pub mode_title: &'static str,
     /// The pill of each preset, in the order of `Mode`: automatic, off,
     /// basic, legacy, default, strict, all.
     pub modes: [&'static str; 7],
     pub mode_notes: [&'static str; 7],
-    /// The pill and the note while the kill switch hides every type error.
-    pub hidden: &'static str,
-    pub hidden_note: &'static str,
+    /// The pill and the note of the type checking card for each
+    /// `displayTypeErrors` choice that overrides the preset, in the order of
+    /// `Display`: configured projects only, missing imports only, off. Always
+    /// on shows the preset's own.
+    pub displays: [&'static str; 3],
+    pub display_notes: [&'static str; 3],
     /// How many errors the sample reports, after the error code shown.
     pub errors: fn(usize) -> String,
 
@@ -57,6 +62,14 @@ pub struct Words {
 
     pub resolution_title: &'static str,
     pub resolution_label: &'static str,
+    /// The card for the override path above the lookup: its title, the chip
+    /// while it is set and while it is empty, and its lines while empty and
+    /// the second line while set, under the path.
+    pub override_title: &'static str,
+    pub override_set: &'static str,
+    pub override_unset: &'static str,
+    pub override_unset_detail: [&'static str; 2],
+    pub override_set_detail: &'static str,
     pub step_project: &'static str,
     pub step_project_detail: [&'static str; 2],
     pub step_global: &'static str,
@@ -69,7 +82,17 @@ pub struct Words {
     pub then: &'static str,
     pub last: &'static str,
     pub used_for: &'static str,
+    /// What the interpreter the lookup finds is used for: analyze, run,
+    /// test, debug, install. The override path takes run, test and install.
     pub uses: [&'static str; 5],
+}
+
+fn override_banner_zh(path: &str) -> String {
+    format!("已设置「Python 解释器覆盖路径」：构建、运行和 pytest 使用 {path}；Pyrefly 分析和调试仍用上面的解释器。")
+}
+
+fn override_banner_en(path: &str) -> String {
+    format!("Python executable override is set: build, run and pytest use {path}; Pyrefly analysis and debugging still use the interpreter above.")
 }
 
 fn errors_zh(count: usize) -> String {
@@ -92,7 +115,8 @@ const ZH: Words = Words {
     off: "关",
 
     interpreter_title: "Python 解释器",
-    interpreter_info: "Pyrefly 分析代码、运行、测试和安装依赖都用这个解释器，Pyrefly 从它的 site-packages 解析第三方库。点击这一行，到「工具链」页为项目或全局选择 .venv、uv、conda、pyenv 等环境，或添加其他目录。",
+    interpreter_info: "Pyrefly 分析代码和调试用这个解释器，Pyrefly 从它的 site-packages 解析第三方库；没有设置「Python 解释器覆盖路径」时，构建、运行、pytest 和安装依赖也用它。点击这一行，到「工具链」页为项目或全局选择 .venv、uv、conda、pyenv 等环境，或添加其他目录。",
+    override_banner: override_banner_zh,
 
     mode_title: "类型检查模式",
     modes: ["自动", "关闭", "基础", "宽松", "默认", "严格", "全部"],
@@ -105,8 +129,12 @@ const ZH: Words = Words {
         "另外要求参数注解等",
         "所有检查都按错误报告",
     ],
-    hidden: "已隐藏",
-    hidden_note: "「隐藏类型错误」已开启，所有文件都不显示",
+    displays: ["仅已配置项目", "仅报告缺失导入", "关闭"],
+    display_notes: [
+        "示例没有 Pyrefly 配置，不显示类型错误",
+        "Pyrefly 已无此模式，未配置的文件按基础检查",
+        "「显示类型错误」已关闭，所有文件都不显示",
+    ],
     errors: errors_zh,
 
     scope_title: "诊断范围",
@@ -135,6 +163,14 @@ const ZH: Words = Words {
 
     resolution_title: "Lithe 按这个顺序找 Python 解释器",
     resolution_label: "Lithe 查找 Python 解释器的顺序",
+    override_title: "Python 解释器覆盖路径",
+    override_set: "已设置",
+    override_unset: "未设置",
+    override_unset_detail: [
+        "留空时，构建、运行和 pytest 也按下面查找",
+        "在「语言与框架 › Python」设置",
+    ],
+    override_set_detail: "构建、运行和 pytest 用它，不按下面查找",
     step_project: "项目环境",
     step_project_detail: [
         "为项目固定的解释器 → .venv、venv、.conda",
@@ -150,7 +186,7 @@ const ZH: Words = Words {
         "VIRTUAL_ENV → PATH 中的 python3、python",
         "→ uv、pyenv、conda、python.org 的安装",
     ],
-    pyrefly_title: "Pyrefly 用同一个解释器",
+    pyrefly_title: "Pyrefly 用查找到的解释器",
     pyrefly_detail: [
         "从它的 site-packages 解析第三方库",
         "换解释器后，缺失导入的报错随之更新",
@@ -171,7 +207,8 @@ const EN: Words = Words {
     off: "Off",
 
     interpreter_title: "Python interpreter",
-    interpreter_info: "Pyrefly analyzes the code with this interpreter, and Lithe runs, tests and installs packages with it; Pyrefly resolves third-party imports from its site-packages. Choose the row to pick a .venv, uv, conda or pyenv environment, or another directory, for the project or for all projects on the Toolchains page.",
+    interpreter_info: "Pyrefly analyzes the code and Lithe debugs with this interpreter; Pyrefly resolves third-party imports from its site-packages. Unless Python executable override is set, Lithe also builds, runs, tests and installs packages with it. Choose the row to pick a .venv, uv, conda or pyenv environment, or another directory, for the project or for all projects on the Toolchains page.",
+    override_banner: override_banner_en,
 
     mode_title: "Type checking mode",
     modes: ["Automatic", "Off", "Basic", "Legacy", "Default", "Strict", "All"],
@@ -184,8 +221,12 @@ const EN: Words = Words {
         "Also asks for parameter annotations",
         "Every check, reported as an error",
     ],
-    hidden: "Hidden",
-    hidden_note: "Hide type errors is on: no file shows them",
+    displays: ["Configured only", "Missing imports", "Off"],
+    display_notes: [
+        "The sample has no Pyrefly config: none shown",
+        "No such mode in Pyrefly now: checks as Basic",
+        "Display type errors is Off: no file shows them",
+    ],
     errors: errors_en,
 
     scope_title: "Diagnostic scope",
@@ -214,6 +255,14 @@ const EN: Words = Words {
 
     resolution_title: "How Lithe finds the Python interpreter",
     resolution_label: "The order in which Lithe looks for the Python interpreter",
+    override_title: "Python executable override",
+    override_set: "Set",
+    override_unset: "Not set",
+    override_unset_detail: [
+        "When empty, build, run and pytest use the lookup",
+        "Set in Languages & Frameworks › Python",
+    ],
+    override_set_detail: "Build, run and pytest use it, not the lookup",
     step_project: "Project",
     step_project_detail: [
         "Pinned for the project → .venv, venv, .conda",
@@ -229,7 +278,7 @@ const EN: Words = Words {
         "VIRTUAL_ENV → python3, python on PATH",
         "→ uv, pyenv, conda and python.org installs",
     ],
-    pyrefly_title: "Pyrefly uses the same interpreter",
+    pyrefly_title: "Pyrefly uses the interpreter found",
     pyrefly_detail: [
         "It resolves third-party imports from its",
         "site-packages, so switching updates them",
@@ -263,6 +312,12 @@ mod tests {
         for tag in ["en", "en-GB", "fr", "zhx", ""] {
             assert_eq!(for_language(tag).on, EN.on, "{tag}");
         }
+    }
+
+    #[test]
+    fn the_override_banner_names_the_path_in_each_language() {
+        assert!((EN.override_banner)("/opt/py/bin/python3").contains("use /opt/py/bin/python3;"));
+        assert!((ZH.override_banner)("/opt/py/bin/python3").contains("使用 /opt/py/bin/python3；"));
     }
 
     #[test]

@@ -70,13 +70,14 @@ fn render(event: &ViewEvent) -> Result<(Vec<Value>, u64), PluginError> {
             let nodes = language::view(&settings, words, event.width);
             Ok((nodes, settings.unrecognized))
         }
-        PYTHON_REGION => Ok((
-            vec![
+        PYTHON_REGION => {
+            let settings = Settings::read(event);
+            let nodes = vec![
                 json!({ "type": "tool", "tool": PYTHON_TOOL }),
-                resolution::canvas(words, event.width),
-            ],
-            0,
-        )),
+                resolution::canvas(words, settings.interpreter_override.as_deref(), event.width),
+            ];
+            Ok((nodes, settings.unrecognized))
+        }
         _ => Err(unknown_region()),
     }
 }
@@ -253,9 +254,15 @@ mod tests {
         for mode in MODES {
             cases.push((json!({ "typeCheckingMode": mode }), json!({})));
         }
+        for display in ["default", "error-missing-imports", "force-off"] {
+            cases.push((
+                json!({ "typeCheckingMode": "all", "displayTypeErrors": "force-on" }),
+                json!({ "displayTypeErrors": display }),
+            ));
+        }
         cases.push((
-            json!({ "typeCheckingMode": "all", "disableTypeErrors": false }),
-            json!({ "disableTypeErrors": true }),
+            json!({ "pythonExecutable": "/opt/homebrew/opt/python@3.13/libexec/bin/python3" }),
+            json!({}),
         ));
         for (scope, auto_import, format, parens) in [
             ("workspace", true, "relative", true),
@@ -638,20 +645,76 @@ mod tests {
     }
 
     #[test]
-    fn off_and_hidden_type_errors_report_nothing() {
+    fn the_off_preset_and_hidden_type_errors_report_nothing() {
         let (squiggles, shown) = reported(json!({ "typeCheckingMode": "off" }), json!({}));
         assert_eq!(squiggles, 0);
         assert!(
             shown.contains("No type errors") && !shown.contains(" · "),
             "{shown}"
         );
+        for (display, pill, note) in [
+            ("default", "Configured only", "has no Pyrefly config"),
+            ("force-off", "Off", "Display type errors is Off"),
+        ] {
+            let (squiggles, shown) = reported(
+                json!({ "typeCheckingMode": "all", "displayTypeErrors": display }),
+                json!({}),
+            );
+            assert_eq!(squiggles, 0, "{display}");
+            assert!(shown.contains(pill) && shown.contains(note), "{shown}");
+            assert!(!shown.contains("no-any-return-implicit"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn missing_imports_only_checks_the_sample_as_basic_whatever_the_preset() {
         let (squiggles, shown) = reported(
-            json!({ "typeCheckingMode": "all", "disableTypeErrors": true }),
+            json!({ "typeCheckingMode": "all", "displayTypeErrors": "error-missing-imports" }),
             json!({}),
         );
-        assert_eq!(squiggles, 0);
-        assert!(shown.contains("Hidden") && shown.contains("Hide type errors is on"));
-        assert!(!shown.contains("no-any-return-implicit"));
+        assert_eq!(squiggles, 1);
+        assert!(shown.contains("unknown-name · 1 error"), "{shown}");
+        assert!(shown.contains("Missing imports") && shown.contains("checks as Basic"));
+    }
+
+    #[test]
+    fn the_override_path_shows_under_the_interpreter_row_and_in_the_lookup() {
+        let path = "/opt/homebrew/opt/python@3.13/libexec/bin/python3";
+        let language = nodes(
+            LANGUAGE_REGION,
+            "en",
+            json!({ "pythonExecutable": path }),
+            json!({}),
+        );
+        let rows = language[0]["children"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1]["type"], "banner");
+        assert!(rows[1]["text"].as_str().unwrap().contains(path));
+        // No banner while the path is empty.
+        let unset = nodes(LANGUAGE_REGION, "en", json!({}), json!({}));
+        assert_eq!(unset[0]["children"].as_array().unwrap().len(), 1);
+
+        // The path keeps its end in the narrowest scene.
+        let set = words_of(&nodes(
+            PYTHON_REGION,
+            "en",
+            json!({ "pythonExecutable": path }),
+            json!({}),
+        ));
+        assert!(
+            set.contains("Python executable override") && set.contains("/libexec/bin/python3"),
+            "{set}"
+        );
+        assert!(set.contains("Build, run and pytest use it"));
+        assert!(
+            set.contains("Used to\nanalyze\ndebug") && !set.contains("\nrun\n"),
+            "{set}"
+        );
+        let empty = words_of(&nodes(PYTHON_REGION, "zh-Hans", json!({}), json!({})));
+        assert!(
+            empty.contains("未设置") && empty.contains("语言服务\n运行\n测试\n调试\n安装依赖"),
+            "{empty}"
+        );
     }
 
     #[test]
@@ -747,21 +810,23 @@ mod tests {
             LANGUAGE_REGION,
             "zh-Hans",
             json!({}),
-            json!({ "disableTypeErrors": true }),
+            json!({ "displayTypeErrors": "force-off" }),
         ));
-        assert!(chinese.contains("含未应用的修改") && chinese.contains("已隐藏"));
+        assert!(chinese.contains("含未应用的修改") && chinese.contains("「显示类型错误」已关闭"));
     }
 
     #[test]
     fn the_python_diagram_lists_the_lookup_in_order_then_pyrefly() {
         let shown = words_of(&nodes(PYTHON_REGION, "en", json!({}), json!({})));
         let order: Vec<usize> = [
+            "Python executable override",
+            "Not set",
             "Tried first",
             ".venv, venv, .conda",
             "Global default",
             "Tried last",
             "VIRTUAL_ENV",
-            "Pyrefly uses the same interpreter",
+            "Pyrefly uses the interpreter found",
         ]
         .iter()
         .map(|word| {
