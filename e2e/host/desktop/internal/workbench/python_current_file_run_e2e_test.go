@@ -152,7 +152,7 @@ func checkPythonCurrentFileRun(t *testing.T, interpreter pythonRunInterpreter) {
 	run := awaitProcessRun(t, h, p, "main.py", nil)
 	checkOutput := func(output string) {
 		t.Helper()
-		if !strings.Contains(output, "current file ran") || !strings.Contains(output, wantPrefix) {
+		if !strings.Contains(output, "current file ran") || !printsPrefix(output, wantPrefix) {
 			t.Fatalf("expected the program to run with sys.prefix %q:\n%s", wantPrefix, output)
 		}
 	}
@@ -186,4 +186,25 @@ func checkPythonCurrentFileRun(t *testing.T, interpreter pythonRunInterpreter) {
 		}
 	}
 	t.Fatal("the build model no longer exposes the main.py target")
+}
+
+// printsPrefix reports whether a line of output names the directory prefix
+// once links are resolved. A framework build of Python, such as Homebrew's,
+// prints its sys.prefix through the opt link even when it starts from the
+// Cellar directory the test resolved and pinned.
+func printsPrefix(output, prefix string) bool {
+	want, err := filepath.EvalSymlinks(prefix)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if got, err := filepath.EvalSymlinks(line); err == nil && got == want {
+			return true
+		}
+	}
+	return false
 }
