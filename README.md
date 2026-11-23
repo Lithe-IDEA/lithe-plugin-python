@@ -31,20 +31,22 @@ Pyrefly 和 debugpy 随插件包分发，Python 解释器、pytest、uv、conda�
 
 ## 设置
 
-**插件设置**（「语言与框架 › Python」，也在 设置 → 插件 → Python Support →「设置」），都立即生效：
+**插件设置**（「语言与框架 › Python」，也在 设置 → 插件 → Python Support →「设置」），除覆盖路径外都立即生效：
 
 | 设置 | 默认 | 说明 |
 | --- | --- | --- |
 | 类型检查模式 | 默认 | Pyrefly 的预设：默认、自动、关闭、基础、宽松、严格、全部。项目有 `pyrefly.toml` 或 `[tool.pyrefly]` 时以项目配置为准；“自动”沿用附近的 mypy 或 Pyright 配置，没有时按“基础” |
-| 隐藏类型错误 | 关 | 所有文件都不显示类型错误，包括有自己 Pyrefly 配置的项目；悬停、跳转、补全照常。开启后类型检查模式选什么都不显示类型错误 |
+| 显示类型错误 | 始终开启 | 在哪些文件里显示类型错误：始终开启（没有 Pyrefly 配置的文件按类型检查模式）、仅已配置项目（只在 `pyrefly.toml` 或 `[tool.pyrefly]` 覆盖的文件里）、仅报告缺失导入、关闭（所有文件都不显示，包括有自己 Pyrefly 配置的项目）。Pyrefly 已经没有只报缺失导入的模式，所以“仅报告缺失导入”让没有 Pyrefly 配置的文件按“基础”检查：报告无法解析的导入和少数 Pyrefly 确定的错误。悬停、跳转、补全在各档都照常 |
 | 诊断范围 | 仅打开的文件 | 或者“整个工作区”：没打开的文件也报告错误级别的问题 |
 | 自动导入补全 | 开 | 补全列出还没导入的名字，确认时插入 `import` |
 | 自动导入路径风格 | 绝对导入 | 插入导入时用完整模块路径还是包内相对路径。也用于“移动符号”“转换模块”代码操作；关闭自动导入补全后只有这两个操作用它 |
 | 补全函数括号 | 关 | 补全函数或方法时加上 `()`，光标停在括号里 |
+| Python 解释器覆盖路径 | 空 | 填一个 Python 可执行文件后，构建任务、运行和 pytest 都用它，不再按下文的顺序查找；Pyrefly 分析和调试仍用查找到的解释器。修改后重新加载项目生效 |
 
 ## Python 解释器
 
-Pyrefly 分析代码、运行、测试、调试、读取依赖、安装依赖都用同一个解释器。Lithe 按这个顺序找：
+Pyrefly 分析代码、运行、测试、调试、读取依赖、安装依赖都用同一个解释器，除非设置了“Python 解释器覆盖路径”：那时构建任务、运行和
+pytest 用覆盖路径，Pyrefly 和调试仍用下面找到的解释器。Lithe 按这个顺序找：
 
 1. **项目环境**：为项目固定的解释器；项目里的 `.venv`、`venv`、`.conda`（项目要先被信任）；项目的 `.python-version` 和
    `pyproject.toml` 的 `requires-python` 决定选哪个版本。
@@ -63,17 +65,17 @@ Python，固定也不行。受影响的有：
 在此之前请把环境建在项目里：`python3 -m venv .venv` 或 `uv venv`；Poetry 先运行 `poetry config virtualenvs.in-project true`，
 Pipenv 设置 `PIPENV_VENV_IN_PROJECT=1`。也可以固定 uv、pyenv、python.org 装的基础解释器，但那里没有环境里装的包。
 
-1.0.0 的“Python 解释器覆盖”设置在 1.1.0 删除了：它只管运行，Pyrefly 却用工具链里的解释器，两边可能不一致。原来填过的路径不再生效，请在工具链页固定它。
+项目外的环境暂时也可以填进“Python 解释器覆盖路径”，让运行和 pytest 先用上它。
 
 ## 设置预览
 
 两块预览由插件后端按界面语言、外观和设置窗口宽度画出。它们用示例代码，不读取打开的项目；截图里的路径和版本是测试数据。
 
-**语言与框架 › Python**：顶部是当前用的 Python 解释器。下面四张卡片各对应一项设置：
+**语言与框架 › Python**：顶部是当前用的 Python 解释器；设置了覆盖路径时，下面多一行说明哪些流程改用它。下面四张卡片各对应一项设置：
 
 | 卡片 | 画出什么 |
 | --- | --- |
-| 类型检查模式 | 示例代码在所选预设下报告哪些错误；隐藏类型错误开启时标为“已隐藏” |
+| 类型检查模式 | 示例代码在所选预设下报告哪些错误；示例没有 Pyrefly 配置，“显示类型错误”不是始终开启时，卡片按它画出实际效果 |
 | 诊断范围 | 一个小项目里哪些文件会被检查 |
 | 自动导入补全 | 补全列出未导入的 `greet`，确认后按绝对或相对路径插入导入；关闭时只补全已导入的名字 |
 | 补全函数括号 | 确认补全后是 `greet()` 还是 `greet` |
@@ -84,7 +86,7 @@ Pipenv 设置 `PIPENV_VENV_IN_PROJECT=1`。也可以固定 uv、pyenv、python.o
 
 <img src="docs/assets/settings-previews/language-en-draft-light.png" alt="还没应用的修改先显示在预览里，英文浅色外观" width="720">
 
-**构建工具 › Python**：画出上面三步查找顺序，以及解释器用在哪些流程。这一页没有设置项，换解释器要到工具链页。
+**构建工具 › Python**：先画覆盖路径（有没有设置、设置后谁用它），再画上面三步查找顺序，以及查找到的解释器用在哪些流程。这一页没有设置项，换解释器要到工具链页。
 
 <img src="docs/assets/settings-previews/build-tools-zh-Hans-dark.png" alt="构建工具 › Python 画出 Lithe 查找 Python 解释器的顺序，深色外观" width="720">
 
@@ -165,7 +167,7 @@ export LITHE_TEST_PYTHON_PLUGIN_ARCHIVE="$PWD/dist/python-support-1.1.0-darwin-a
 PYTEST_PYTHON=/path/to/python3.12 node scripts/e2e-host.mjs
 # 用同一个包检查 0.8.9：高亮、当前文件运行、固定解释器、手动运行
 PYTEST_PYTHON=/path/to/python3.12 node scripts/e2e-host.mjs --ref desktop-v0.8.9 \
-  --run '^TestPythonSupportPlugin(GrammarHighlighting|RunCurrentFile(PinnedInterpreter)?|ManualRunAndDependencies)$'
+  --run '^TestPythonSupportPlugin(GrammarHighlighting|RunCurrentFile(InterpreterOverride|PinnedInterpreter)?|ManualRunAndDependencies)$'
 ```
 
 插件包路径要写绝对路径。脚本把宿主检出到 `.artifacts/lithe-host`，复制 `e2e/host/desktop/` 下的测试后运行；`--source`、`--ref`、`--run`

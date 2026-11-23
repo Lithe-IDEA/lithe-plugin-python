@@ -96,10 +96,20 @@
   ],
   "settings": [
     {
+      "id": "pythonExecutable",
+      "type": "file",
+      "title": "Python executable override",
+      "description": "Explicit path to the Python interpreter for build, run, and pytest commands. Leave empty to use the interpreter the Toolchains page resolves for the project (.venv, venv, .conda, VIRTUAL_ENV, PATH, or discovered conda / uv / pyenv installations). Pyrefly analysis and debugging always use the Toolchains interpreter.",
+      "default": "",
+      "effect": "reload",
+      "page": { "languageID": "python" },
+      "section": "Python Interpreter"
+    },
+    {
       "id": "typeCheckingMode",
       "type": "enum",
       "title": "Type checking mode",
-      "description": "Pyrefly's preset for files no pyrefly.toml or [tool.pyrefly] covers; a project's own Pyrefly config wins. Automatic follows a nearby mypy or Pyright config, else checks as Basic. While Hide type errors is on, no preset shows type errors.",
+      "description": "Pyrefly's preset for files no pyrefly.toml or [tool.pyrefly] covers; a project's own Pyrefly config wins. Automatic follows a nearby mypy or Pyright config, else checks as Basic. Display type errors decides whether the preset applies: Configured projects only shows no type errors in files without a Pyrefly config, Missing imports only checks them as Basic instead, and Off shows none in any file.",
       "default": "default",
       "options": [
         { "value": "default", "title": "Default" },
@@ -115,11 +125,17 @@
       "section": "Pyrefly"
     },
     {
-      "id": "disableTypeErrors",
-      "type": "boolean",
-      "title": "Hide type errors",
-      "description": "Hide type errors in every file, including projects with their own Pyrefly config. Hover, go to definition and completion keep working.",
-      "default": false,
+      "id": "displayTypeErrors",
+      "type": "enum",
+      "title": "Display type errors",
+      "description": "Where Pyrefly shows type errors: in every file, only in files a pyrefly.toml or [tool.pyrefly] covers, or in no file. Pyrefly no longer has a missing-imports-only mode, so Missing imports only checks files without a Pyrefly config as Basic, which reports unresolved imports and a few other errors Pyrefly is sure of. Hover, go to definition and completion keep working in every mode.",
+      "default": "force-on",
+      "options": [
+        { "value": "force-on", "title": "Always on" },
+        { "value": "default", "title": "Configured projects only" },
+        { "value": "error-missing-imports", "title": "Missing imports only" },
+        { "value": "force-off", "title": "Off" }
+      ],
       "effect": "immediate",
       "page": { "languageID": "python" },
       "section": "Pyrefly"
@@ -206,7 +222,7 @@
         "python": {
           "pyrefly": {
             "typeCheckingMode": "${setting:typeCheckingMode}",
-            "disableTypeErrors": "${setting:disableTypeErrors}",
+            "displayTypeErrors": "${setting:displayTypeErrors}",
             "diagnosticMode": "${setting:diagnosticMode}"
           },
           "analysis": {
@@ -496,6 +512,7 @@
       },
       "invocation": {
         "executables": [
+          { "kind": "setting", "settingID": "pythonExecutable" },
           { "kind": "toolchain", "toolchainID": "python" }
         ],
         "version": {
@@ -512,6 +529,7 @@
           "runtimeArguments": ["-I", "-B"],
           "entry": "scripts/build_provider.py"
         },
+        "initializationOptions": { "pythonExecutable": "${setting:pythonExecutable}" },
         "executesProjectCode": true,
         "mayUseNetwork": false
       },

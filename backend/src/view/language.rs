@@ -17,7 +17,7 @@ use super::scene::{
     code, column, group, pair, path, pill, rect, runs, squiggle, text, text_width, token, Node,
     CAPTION, STRONG,
 };
-use super::settings::{ImportFormat, Mode, Scope, Settings};
+use super::settings::{Display, ImportFormat, Mode, Scope, Settings};
 use super::words::Words;
 use serde_json::{json, Value};
 
@@ -32,7 +32,7 @@ pub const TOOLS: [&str; 1] = ["python"];
 /// The settings the cards show; a draft of any of them marks the preview.
 pub const SETTINGS: [&str; 6] = [
     "typeCheckingMode",
-    "disableTypeErrors",
+    "displayTypeErrors",
     "diagnosticMode",
     "autoImportCompletions",
     "importFormat",
@@ -139,12 +139,21 @@ struct Card<'a> {
     preview: Vec<Node>,
 }
 
-/// The region's nodes: the interpreter row, then the preview.
+/// The region's nodes: the interpreter row, then the preview. While the
+/// override path is set, a banner under the row says which commands use it
+/// instead.
 pub fn view(settings: &Settings, words: &Words, width: Option<f64>) -> Vec<Value> {
-    let tools: Vec<Value> = TOOLS
+    let mut tools: Vec<Value> = TOOLS
         .iter()
         .map(|tool| json!({ "type": "tool", "tool": tool }))
         .collect();
+    if let Some(path) = &settings.interpreter_override {
+        tools.push(json!({
+            "type": "banner",
+            "text": (words.override_banner)(path),
+            "tone": "accent",
+        }));
+    }
     vec![
         json!({
             "type": "section",
@@ -174,15 +183,20 @@ fn mode_index(mode: Mode) -> usize {
 /// order the cards stand.
 fn values<'a>(settings: &Settings, words: &'a Words) -> [(&'a str, bool, &'a str); 4] {
     let switch = |on: bool| if on { words.on } else { words.off };
-    let mode = if settings.hide_type_errors {
-        (words.hidden, false, words.hidden_note)
-    } else {
-        let index = mode_index(settings.mode);
-        (
-            words.modes[index],
-            settings.mode != Mode::Off,
-            words.mode_notes[index],
-        )
+    let display =
+        |index: usize, lit: bool| (words.displays[index], lit, words.display_notes[index]);
+    let mode = match settings.display {
+        Display::AlwaysOn => {
+            let index = mode_index(settings.mode);
+            (
+                words.modes[index],
+                settings.mode != Mode::Off,
+                words.mode_notes[index],
+            )
+        }
+        Display::ConfiguredOnly => display(0, false),
+        Display::MissingImports => display(1, true),
+        Display::Off => display(2, false),
     };
     let scope = match settings.scope {
         Scope::OpenFiles => (words.scope_open, false, words.scope_open_note),
@@ -235,7 +249,10 @@ pub fn canvas(settings: &Settings, words: &Words, width: Option<f64>) -> Value {
             value: mode.0,
             lit: mode.1,
             note: mode.2,
-            changed: settings.any_changed(&["typeCheckingMode", "disableTypeErrors"]),
+            // The preset decides this card only while type errors are always on.
+            changed: settings.is_changed("displayTypeErrors")
+                || (settings.display == Display::AlwaysOn
+                    && settings.is_changed("typeCheckingMode")),
             preview: type_check_preview(settings.reporting(), words, box_w),
         },
         Card {
@@ -435,7 +452,7 @@ fn reported(mode: Mode) -> (usize, Option<usize>) {
 
 /// A function missing an annotation, a call with a string for a float, and a
 /// misspelled name, in a box `box_w` wide; under it what the preset in force
-/// reports. Nothing is reported while type errors are hidden or off.
+/// reports. Nothing is reported while the preset is off or type errors are.
 fn type_check_preview(reporting: Option<Mode>, words: &Words, box_w: f64) -> Vec<Node> {
     let mut nodes = numbered(vec![
         vec![
@@ -708,7 +725,7 @@ mod tests {
             let mut pairs: Vec<(&str, &str)> = w
                 .modes
                 .iter()
-                .chain([&w.hidden])
+                .chain(&w.displays)
                 .map(|value| (w.mode_title, *value))
                 .collect();
             pairs.extend([w.scope_open, w.scope_workspace].map(|value| (w.scope_title, value)));
@@ -734,8 +751,7 @@ mod tests {
     fn every_note_fits_the_narrowest_card() {
         for language in ["en", "zh-Hans"] {
             let w = words::for_language(language);
-            let notes = w.mode_notes.iter().copied().chain([
-                w.hidden_note,
+            let notes = w.mode_notes.iter().chain(&w.display_notes).copied().chain([
                 w.scope_open_note,
                 w.scope_workspace_note,
                 w.import_absolute_note,

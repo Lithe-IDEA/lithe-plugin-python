@@ -4,6 +4,7 @@
 //! user changed but has not applied (the draft) wins over the saved one, and a
 //! setting with neither shows the default `plugin.json` declares.
 
+pub use crate::type_errors::Display;
 use lithe_plugin_sdk::view::ViewEvent;
 use serde_json::Value;
 
@@ -82,10 +83,12 @@ impl ImportFormat {
 /// The plugin's settings as the settings window holds them now.
 #[derive(Debug)]
 pub struct Settings {
+    /// The Python executable override: the interpreter build, run and
+    /// pytest commands use instead of the Toolchains page's, when set.
+    pub interpreter_override: Option<String>,
     pub mode: Mode,
-    /// Pyrefly's `disableTypeErrors`: no file shows type errors, whatever
-    /// the preset or the project's own Pyrefly config says.
-    pub hide_type_errors: bool,
+    /// Where type errors appear, which decides whether the preset does.
+    pub display: Display,
     pub scope: Scope,
     pub auto_import: bool,
     pub import_format: ImportFormat,
@@ -104,10 +107,17 @@ impl Settings {
             changed: Vec::new(),
             unrecognized: 0,
         };
+        let interpreter_override = reader.read("pythonExecutable", Value::from(""), |value| {
+            value
+                .as_str()
+                .map(|path| (!path.is_empty()).then(|| path.to_owned()))
+        });
         let mode = reader.read("typeCheckingMode", Value::from("default"), |value| {
             value.as_str().and_then(Mode::parse)
         });
-        let hide_type_errors = reader.boolean("disableTypeErrors", false);
+        let display = reader.read("displayTypeErrors", Value::from("force-on"), |value| {
+            value.as_str().and_then(Display::parse)
+        });
         let scope = reader.read("diagnosticMode", Value::from("openFilesOnly"), |value| {
             value.as_str().and_then(Scope::parse)
         });
@@ -117,8 +127,9 @@ impl Settings {
         });
         let function_parens = reader.boolean("completeFunctionParens", false);
         Self {
+            interpreter_override,
             mode,
-            hide_type_errors,
+            display,
             scope,
             auto_import,
             import_format,
@@ -128,10 +139,16 @@ impl Settings {
         }
     }
 
-    /// The preset that decides what the sample reports: none while type
-    /// errors are hidden, which silences every preset.
+    /// The preset that decides what the sample, which has no Pyrefly config,
+    /// reports: the one `displayTypeErrors` sends Pyrefly for such a file,
+    /// or none when that is `off` or type errors are switched off.
     pub fn reporting(&self) -> Option<Mode> {
-        (!self.hide_type_errors).then(|| self.mode.applied())
+        match self.display {
+            Display::AlwaysOn => Some(self.mode.applied()),
+            Display::ConfiguredOnly => Some(Mode::Off),
+            Display::MissingImports => Some(Mode::Basic),
+            Display::Off => None,
+        }
     }
 
     /// Whether the user changed `id` without applying it yet.
@@ -197,53 +214,64 @@ mod tests {
     #[test]
     fn a_setting_without_a_value_shows_its_declared_default() {
         let settings = Settings::read(&event(json!({}), json!({})));
+        assert_eq!(settings.interpreter_override, None);
         assert_eq!(settings.mode, Mode::Default);
-        assert!(!settings.hide_type_errors);
+        assert_eq!(settings.display, Display::AlwaysOn);
         assert_eq!(settings.scope, Scope::OpenFiles);
         assert!(settings.auto_import && !settings.function_parens);
         assert_eq!(settings.import_format, ImportFormat::Absolute);
         assert_eq!(settings.unrecognized, 0);
-        assert!(!settings.any_changed(&["typeCheckingMode", "disableTypeErrors", "importFormat"]));
+        assert!(!settings.any_changed(&["typeCheckingMode", "displayTypeErrors", "importFormat"]));
     }
 
     #[test]
     fn the_draft_wins_over_the_saved_value_and_counts_as_a_change() {
         let settings = Settings::read(&event(
-            json!({ "typeCheckingMode": "basic", "importFormat": "absolute", "disableTypeErrors": false }),
-            json!({ "typeCheckingMode": "strict", "disableTypeErrors": false, "importFormat": "relative" }),
+            json!({ "typeCheckingMode": "basic", "importFormat": "absolute", "displayTypeErrors": "default" }),
+            json!({ "typeCheckingMode": "strict", "displayTypeErrors": "default", "importFormat": "relative", "pythonExecutable": "/opt/py/bin/python3" }),
         ));
         assert_eq!(settings.mode, Mode::Strict);
         assert_eq!(settings.import_format, ImportFormat::Relative);
+        assert_eq!(
+            settings.interpreter_override.as_deref(),
+            Some("/opt/py/bin/python3")
+        );
         assert!(settings.is_changed("typeCheckingMode"));
         assert!(settings.is_changed("importFormat"));
+        assert!(settings.is_changed("pythonExecutable"));
         // A draft equal to the value in force changes nothing.
-        assert!(!settings.is_changed("disableTypeErrors"));
+        assert!(!settings.is_changed("displayTypeErrors"));
         assert!(!settings.is_changed("diagnosticMode"));
     }
 
     #[test]
     fn a_value_outside_the_declaration_shows_the_default_and_is_counted() {
         let settings = Settings::read(&event(
-            json!({ "typeCheckingMode": "pedantic", "autoImportCompletions": "yes" }),
-            // The removed setting the kill switch replaced is not read at all.
-            json!({ "displayTypeErrors": "force-off" }),
+            json!({ "typeCheckingMode": "pedantic", "autoImportCompletions": "yes", "pythonExecutable": 3 }),
+            json!({ "displayTypeErrors": "hidden" }),
         ));
         assert_eq!(settings.mode, Mode::Default);
-        assert!(settings.auto_import && !settings.hide_type_errors);
-        assert_eq!(settings.unrecognized, 2);
+        assert_eq!(settings.display, Display::AlwaysOn);
+        assert_eq!(settings.interpreter_override, None);
+        assert!(settings.auto_import);
+        assert_eq!(settings.unrecognized, 4);
     }
 
     #[test]
-    fn automatic_checks_the_unconfigured_sample_as_basic_and_hidden_errors_report_nothing() {
-        let read = |mode: &str, hide: bool| {
+    fn the_unconfigured_sample_reports_by_the_preset_pyrefly_gets_for_it() {
+        let read = |mode: &str, display: &str| {
             Settings::read(&event(
-                json!({ "typeCheckingMode": mode, "disableTypeErrors": hide }),
+                json!({ "typeCheckingMode": mode, "displayTypeErrors": display }),
                 json!({}),
             ))
             .reporting()
         };
-        assert_eq!(read("auto", false), Some(Mode::Basic));
-        assert_eq!(read("legacy", false), Some(Mode::Legacy));
-        assert_eq!(read("strict", true), None);
+        assert_eq!(read("auto", "force-on"), Some(Mode::Basic));
+        assert_eq!(read("legacy", "force-on"), Some(Mode::Legacy));
+        // Configured projects only silences a file without a Pyrefly config.
+        assert_eq!(read("strict", "default"), Some(Mode::Off));
+        // Pyrefly has no missing-imports-only mode any more: Basic stands in.
+        assert_eq!(read("all", "error-missing-imports"), Some(Mode::Basic));
+        assert_eq!(read("strict", "force-off"), None);
     }
 }

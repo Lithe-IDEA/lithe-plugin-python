@@ -27,9 +27,13 @@
     }
   },
   "settings": {
+    "pythonExecutable": {
+      "title": "Python 解释器覆盖路径",
+      "description": "构建、运行和 pytest 命令使用的 Python 解释器路径。留空时使用「工具链」页为项目解析出的解释器（.venv、venv、.conda、VIRTUAL_ENV、PATH，或发现的 conda、uv、pyenv 安装）。Pyrefly 分析和调试始终使用「工具链」页的解释器。"
+    },
     "typeCheckingMode": {
       "title": "类型检查模式",
-      "description": "Pyrefly 对没有 pyrefly.toml 或 [tool.pyrefly] 的文件使用的预设；项目自己的 Pyrefly 配置优先。“自动”沿用附近的 mypy 或 Pyright 配置，没有时按“基础”检查。开启“隐藏类型错误”后，选哪个预设都不显示类型错误。",
+      "description": "Pyrefly 对没有 pyrefly.toml 或 [tool.pyrefly] 的文件使用的预设；项目自己的 Pyrefly 配置优先。“自动”沿用附近的 mypy 或 Pyright 配置，没有时按“基础”检查。「显示类型错误」决定预设是否生效：选“仅已配置项目”时，没有 Pyrefly 配置的文件不显示类型错误；选“仅报告缺失导入”时，这些文件改按“基础”检查；选“关闭”时，所有文件都不显示。",
       "options": {
         "default": "默认",
         "auto": "自动",
@@ -40,9 +44,15 @@
         "all": "全部"
       }
     },
-    "disableTypeErrors": {
-      "title": "隐藏类型错误",
-      "description": "开启后所有文件都不显示类型错误，包括有自己 Pyrefly 配置的项目；悬停、跳转和补全照常可用。"
+    "displayTypeErrors": {
+      "title": "显示类型错误",
+      "description": "Pyrefly 在哪些文件里显示类型错误：所有文件、只在 pyrefly.toml 或 [tool.pyrefly] 覆盖的文件里，或所有文件都不显示。Pyrefly 已经没有“只报告缺失导入”的模式，所以选“仅报告缺失导入”时，没有 Pyrefly 配置的文件按“基础”检查：报告无法解析的导入，以及少量 Pyrefly 确信的其他错误。选哪一项，悬停、跳转和补全都照常可用。",
+      "options": {
+        "force-on": "始终开启",
+        "default": "仅已配置项目",
+        "error-missing-imports": "仅报告缺失导入",
+        "force-off": "关闭"
+      }
     },
     "diagnosticMode": {
       "title": "诊断范围",
@@ -78,6 +88,7 @@
     }
   },
   "sections": {
+    "Python Interpreter": "Python 解释器",
     "Pyrefly": "Pyrefly",
     "Completions": "代码补全"
   }

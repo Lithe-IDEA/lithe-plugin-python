@@ -3,6 +3,7 @@ package workbench
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,18 +18,39 @@ import (
 	"github.com/1lck/Lithe-IDEA/desktop/internal/toolchain"
 )
 
+// pythonRunInterpreter is where a current-file run test expects the
+// interpreter to come from.
+type pythonRunInterpreter int
+
+const (
+	// The project's own .venv, found by the lookup.
+	projectEnvironment pythonRunInterpreter = iota
+	// An installation pinned for the project, as the Toolchains page does.
+	pinnedInstallation
+	// The Python executable override setting, which build, run and pytest
+	// use before the lookup.
+	executableOverride
+)
+
 func TestPythonSupportPluginRunCurrentFile(t *testing.T) {
-	checkPythonCurrentFileRun(t, false)
+	checkPythonCurrentFileRun(t, projectEnvironment)
 }
 
 // TestPythonSupportPluginRunCurrentFilePinnedInterpreter pins another
 // interpreter for the project, as the Toolchains page does, and expects the
 // run to use it over the project's .venv.
 func TestPythonSupportPluginRunCurrentFilePinnedInterpreter(t *testing.T) {
-	checkPythonCurrentFileRun(t, true)
+	checkPythonCurrentFileRun(t, pinnedInstallation)
 }
 
-func checkPythonCurrentFileRun(t *testing.T, pinned bool) {
+// TestPythonSupportPluginRunCurrentFileInterpreterOverride sets the Python
+// executable override to an environment outside the project and expects the
+// run to use it over the project's .venv.
+func TestPythonSupportPluginRunCurrentFileInterpreterOverride(t *testing.T) {
+	checkPythonCurrentFileRun(t, executableOverride)
+}
+
+func checkPythonCurrentFileRun(t *testing.T, interpreter pythonRunInterpreter) {
 	t.Helper()
 	archive := pythonArchiveForE2E(t)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
@@ -68,14 +90,37 @@ func checkPythonCurrentFileRun(t *testing.T, pinned bool) {
 	if _, err := trust.Save(ctx, kernel, true, false); err != nil {
 		t.Fatal(err)
 	}
+	wantPrefix := venv
+	if interpreter == executableOverride {
+		overrideDir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantPrefix = filepath.Join(overrideDir, "configured interpreter")
+		if output, err := exec.CommandContext(ctx, python, "-m", "venv", "--without-pip", wantPrefix).CombinedOutput(); err != nil {
+			t.Fatalf("create configured environment: %v\n%s", err, output)
+		}
+		configured := filepath.Join(wantPrefix, "bin", "python")
+		if runtime.GOOS == "windows" {
+			configured = filepath.Join(wantPrefix, "Scripts", "python.exe")
+		}
+		settings, err := json.Marshal(map[string]map[string]string{
+			pythonSupportPluginID: {"pythonExecutable": configured},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(preferences.Dir(), "plugin-settings.json"), settings, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	h := newHarnessWithOptions(t, Options{
 		Kernel: kernel, PluginKernel: kernel, PluginRoot: t.TempDir(), Store: preferences,
 		Languages: []string{"en"},
 	})
 	installPythonArchive(t, ctx, h.app.plugins, archive)
 	h.app.reloadPluginLanguages()
-	wantPrefix := venv
-	if pinned {
+	if interpreter == pinnedInstallation {
 		home, version := pythonInstallationForE2E(t, ctx, cmp.Or(os.Getenv("PYTEST_PYTHON"), python))
 		wantPrefix = home
 		addPythonInstallationForE2E(t, ctx, h, home)

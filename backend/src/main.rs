@@ -4,6 +4,7 @@ mod discovery;
 mod inspect;
 mod pyrefly;
 mod requirements;
+mod type_errors;
 mod view;
 
 use lithe_plugin_sdk::Backend;
