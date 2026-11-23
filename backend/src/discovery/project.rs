@@ -98,13 +98,20 @@ fn project_file(
     // alternatives. A manager pin and the project's compatibility range apply
     // together, so publish one request anchored at the file selecting the version.
     if let Some((source, request)) = selected_version {
+        // A virtual environment answers only to its own name, as a
+        // pyenv-virtualenv pin names it; by version, the pin means a base
+        // interpreter, not some other project's environment made from one.
         let installation = choose(snapshot, |candidate| {
             allows_version(&candidate.version)
                 && candidate
                     .names
                     .iter()
                     .filter_map(|name| name.to_str())
-                    .any(|name| matches_version_file(&request, name, &candidate.version))
+                    .any(|name| {
+                        name == request
+                            || (!candidate.virtual_environment
+                                && matches_version_file(&request, name, &candidate.version))
+                    })
         });
         statement(
             snapshot,
@@ -115,7 +122,9 @@ fn project_file(
             "compatible",
         )?;
     } else if let Some((source, request, _)) = &project_requirement {
-        let installation = choose(snapshot, |candidate| allows_version(&candidate.version));
+        let installation = choose(snapshot, |candidate| {
+            !candidate.virtual_environment && allows_version(&candidate.version)
+        });
         statement(
             snapshot,
             source,

@@ -17,11 +17,16 @@ pub(super) enum Source {
     Pyenv,
     Poetry,
     Pipenv,
+    Hatch,
+    Virtualenvwrapper,
 }
 
 pub(super) struct Metadata {
     pub(super) version: Version,
     pub(super) input: Option<PathBuf>,
+    /// The version came from `pyvenv.cfg`: the home is a virtual environment
+    /// made from some base interpreter, not an installation of its own.
+    pub(super) virtual_environment: bool,
 }
 
 pub(super) fn io_failure(_: io::Error) -> Failure {
@@ -78,25 +83,49 @@ pub(super) fn read_text(path: &Path, within: Option<&Path>) -> Result<Option<Str
         .map_err(|_| Failure::ProviderUnavailable)
 }
 
-pub(super) fn has_safe_executable(home: &Path) -> Result<bool> {
-    let layouts = if cfg!(windows) {
-        ["Scripts/python.exe", "python.exe"]
+/// Mirrors the host check of an installation's program so the provider only
+/// reports homes the host accepts. Core decides on the first layout that exists.
+/// A program inside the home is accepted as is. A virtual environment's program
+/// usually links to its base interpreter outside the environment; the tool
+/// definition allows that (`executableLinksOutsideHome`) as long as every
+/// directory on the layout path, such as `bin`, stays inside the home. Nothing
+/// on the way may enter the workspace.
+pub(super) fn has_safe_executable(home: &Path, workspace: Option<&Path>) -> Result<bool> {
+    let layouts: [&[&str]; 2] = if cfg!(windows) {
+        [&["Scripts", "python.exe"], &["python.exe"]]
     } else {
-        ["bin/python3", "bin/python"]
+        [&["bin", "python3"], &["bin", "python"]]
     };
-    for layout in layouts {
-        let path = home.join(layout);
-        let Some(canonical) = optional(dunce::canonicalize(&path))? else {
+    let in_workspace = |path: &Path| workspace.is_some_and(|root| path.starts_with(root));
+    for segments in layouts {
+        let path = segments
+            .iter()
+            .fold(home.to_path_buf(), |path, segment| path.join(segment));
+        if optional(fs::symlink_metadata(&path))?.is_none() {
             continue;
+        }
+        // Skipping a present but unusable layout and looking for the next one
+        // would report a home the host rejects.
+        let Some(target) = optional(dunce::canonicalize(&path))? else {
+            return Ok(false);
         };
-        // Core checks the first present layout and rejects an escaping target.
-        // Skipping that target and looking for a second layout would emit a
-        // candidate the host cannot validate.
-        if !canonical.starts_with(home) {
+        if in_workspace(&target) {
             return Ok(false);
         }
-        let Some(metadata) = optional(fs::metadata(canonical))? else {
-            continue;
+        if !target.starts_with(home) {
+            let mut parent = home.to_path_buf();
+            for segment in &segments[..segments.len() - 1] {
+                parent.push(segment);
+                let Some(directory) = canonical_directory(&parent)? else {
+                    return Ok(false);
+                };
+                if !directory.starts_with(home) || in_workspace(&directory) {
+                    return Ok(false);
+                }
+            }
+        }
+        let Some(metadata) = optional(fs::metadata(&target))? else {
+            return Ok(false);
         };
         #[cfg(unix)]
         let executable = {
@@ -127,6 +156,7 @@ pub(super) fn version(
             return Ok(Some(Metadata {
                 version,
                 input: Some(venv_cfg),
+                virtual_environment: true,
             }));
         }
     }
@@ -147,6 +177,7 @@ pub(super) fn version(
     Ok(version.map(|version| Metadata {
         version,
         input: None,
+        virtual_environment: false,
     }))
 }
 
@@ -194,6 +225,7 @@ fn conda_version(home: &Path, mut step: impl FnMut() -> Result<()>) -> Result<Op
     Ok(python.map(|(version, input)| Metadata {
         version,
         input: Some(input),
+        virtual_environment: false,
     }))
 }
 
@@ -204,4 +236,95 @@ fn parse_release(value: &str) -> Option<Version> {
         .parse()
         .ok()
         .filter(|_: &Version| numeric_release(value).is_some())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::has_safe_executable;
+    use std::fs;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::path::{Path, PathBuf};
+
+    /// A scratch directory removed when the test ends, canonical like the homes
+    /// discovery passes in.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "python-support-metadata-{name}-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            Self(dunce::canonicalize(path).unwrap())
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn interpreter(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A venv made by `python -m venv` outside the project: `bin/python3`
+    /// links to the base interpreter in another directory.
+    fn environment(scratch: &Path, target: &Path) -> PathBuf {
+        let home = scratch.join("env");
+        fs::create_dir_all(home.join("bin")).unwrap();
+        symlink(target, home.join("bin/python3")).unwrap();
+        home
+    }
+
+    #[test]
+    fn an_environment_linking_to_its_base_interpreter_is_reported() {
+        let scratch = Scratch::new("linked");
+        let base = scratch.0.join("base/bin/python3.12");
+        interpreter(&base);
+        let home = environment(&scratch.0, &base);
+        assert!(has_safe_executable(&home, Some(&scratch.0.join("project"))).unwrap());
+    }
+
+    #[test]
+    fn a_program_inside_the_home_is_reported() {
+        let scratch = Scratch::new("inside");
+        let home = scratch.0.join("install");
+        interpreter(&home.join("bin/python3"));
+        assert!(has_safe_executable(&home, None).unwrap());
+    }
+
+    #[test]
+    fn a_program_in_the_workspace_is_not_reported() {
+        let scratch = Scratch::new("workspace");
+        let workspace = scratch.0.join("project");
+        let target = workspace.join("tools/python3");
+        interpreter(&target);
+        let home = environment(&scratch.0, &target);
+        assert!(!has_safe_executable(&home, Some(&workspace)).unwrap());
+    }
+
+    #[test]
+    fn a_bin_directory_leaving_the_home_is_not_reported() {
+        let scratch = Scratch::new("bin");
+        let base = scratch.0.join("base");
+        interpreter(&base.join("bin/python3"));
+        let home = scratch.0.join("env");
+        fs::create_dir_all(&home).unwrap();
+        symlink(base.join("bin"), home.join("bin")).unwrap();
+        assert!(!has_safe_executable(&home, None).unwrap());
+    }
+
+    #[test]
+    fn a_broken_first_layout_decides_like_the_host() {
+        let scratch = Scratch::new("dangling");
+        let home = environment(&scratch.0, &scratch.0.join("missing/python3"));
+        interpreter(&home.join("bin/python"));
+        assert!(!has_safe_executable(&home, None).unwrap());
+    }
 }

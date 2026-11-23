@@ -28,6 +28,9 @@ struct Installation {
     home: String,
     names: BTreeSet<OsString>,
     version: Version,
+    /// A virtual environment belongs to one project. A version request picks
+    /// it only by its name, never by its version alone.
+    virtual_environment: bool,
 }
 
 struct Snapshot<'a> {
@@ -93,6 +96,17 @@ pub(crate) fn query(
     if let Some(pipenv) = pipenv_root(user_home.as_deref()) {
         snapshot.scan(&pipenv, Source::Pipenv)?;
     }
+    // virtualenvwrapper keeps environments in ~/.virtualenvs unless WORKON_HOME
+    // moves them, and so does Hatch when configured to use it. On Windows this
+    // is already the Pipenv default above.
+    if !cfg!(windows) && env::var_os("WORKON_HOME").is_none() {
+        if let Some(home) = &user_home {
+            snapshot.scan(&home.join(".virtualenvs"), Source::Virtualenvwrapper)?;
+        }
+    }
+    if let Some(hatch) = hatch_root(user_home.as_deref()) {
+        snapshot.scan_hatch(&hatch)?;
+    }
     if let Some((root, directory)) = workspace {
         project::read(&mut snapshot, &root, &directory)?;
     }
@@ -150,24 +164,49 @@ impl Snapshot<'_> {
 
     fn scan(&mut self, root: &Path, source: Source) -> Result<()> {
         self.watch(root)?;
-        let Some(root) = canonical_directory(root)? else {
-            return Ok(());
+        for entry in self.entries(root)? {
+            self.observe(&entry, source)?;
+        }
+        Ok(())
+    }
+
+    /// Hatch keeps each environment under `<project name>/<project ID>/`. The
+    /// root and each project ID directory are watched, as an environment is
+    /// added to the latter; a new project name also changes the root.
+    fn scan_hatch(&mut self, root: &Path) -> Result<()> {
+        self.watch(root)?;
+        for project in self.entries(root)? {
+            for id in self.entries(&project)? {
+                if canonical_directory(&id)?.is_some() {
+                    self.scan(&id, Source::Hatch)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Lists the entries of a directory outside the workspace, skipping hidden
+    /// ones such as Hatch's `.pythons`. A missing directory has no entries.
+    fn entries(&mut self, directory: &Path) -> Result<Vec<PathBuf>> {
+        let Some(directory) = canonical_directory(directory)? else {
+            return Ok(Vec::new());
         };
         if self
             .workspace
             .as_ref()
-            .is_some_and(|workspace| root.starts_with(workspace))
+            .is_some_and(|workspace| directory.starts_with(workspace))
         {
-            return Ok(());
+            return Ok(Vec::new());
         }
-        for entry in std::fs::read_dir(root).map_err(metadata::io_failure)? {
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(directory).map_err(metadata::io_failure)? {
             self.step()?;
             let entry = entry.map_err(metadata::io_failure)?;
             if !entry.file_name().as_encoded_bytes().starts_with(b".") {
-                self.observe(&entry.path(), source)?;
+                entries.push(entry.path());
             }
         }
-        Ok(())
+        Ok(entries)
     }
 
     fn observe(&mut self, candidate: &Path, source: Source) -> Result<()> {
@@ -190,11 +229,14 @@ impl Snapshot<'_> {
             existing.names.extend(names);
             return Ok(());
         }
-        if !metadata::has_safe_executable(&home)? {
+        if !metadata::has_safe_executable(&home, self.workspace.as_deref())? {
             return Ok(());
         }
-        let Some(Metadata { version, input }) =
-            metadata::version(&home, candidate, source, || self.step())?
+        let Some(Metadata {
+            version,
+            input,
+            virtual_environment,
+        }) = metadata::version(&home, candidate, source, || self.step())?
         else {
             return Ok(());
         };
@@ -210,6 +252,7 @@ impl Snapshot<'_> {
                 home: wire_home,
                 names,
                 version,
+                virtual_environment,
             },
         );
         if self.installations.len() > MAX_INSTALLATIONS {
@@ -275,6 +318,21 @@ fn poetry_root(home: Option<&Path>) -> Option<PathBuf> {
         });
         cache.map(|path| path.join("virtualenvs"))
     })
+}
+
+fn hatch_root(home: Option<&Path>) -> Option<PathBuf> {
+    let data = absolute_env("HATCH_DATA_DIR").or_else(|| {
+        if cfg!(target_os = "macos") {
+            home.map(|path| path.join("Library/Application Support/hatch"))
+        } else if cfg!(windows) {
+            absolute_env("LOCALAPPDATA").map(|path| path.join("hatch"))
+        } else {
+            absolute_env("XDG_DATA_HOME")
+                .or_else(|| home.map(|path| path.join(".local/share")))
+                .map(|path| path.join("hatch"))
+        }
+    });
+    data.map(|path| path.join("env/virtual"))
 }
 
 fn pipenv_root(home: Option<&Path>) -> Option<PathBuf> {

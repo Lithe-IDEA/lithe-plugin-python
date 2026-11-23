@@ -145,7 +145,7 @@ struct Card<'a> {
 pub fn view(settings: &Settings, words: &Words, width: Option<f64>) -> Vec<Value> {
     let mut tools: Vec<Value> = TOOLS
         .iter()
-        .map(|tool| json!({ "type": "tool", "tool": tool }))
+        .map(|tool| json!({ "type": "tool", "tool": tool, "choose": true }))
         .collect();
     if let Some(path) = &settings.interpreter_override {
         tools.push(json!({

@@ -8,9 +8,10 @@ Pyrefly 和 debugpy 随插件包分发，Python 解释器、pytest、uv、conda�
 > English: Python support for Lithe — Pyrefly code intelligence and type checking, run entries, a pytest test tree and
 > the installed-package tree in the build window, uv/conda/Ruff/mypy tasks, debugpy debugging, a Python project entry in
 > New Project, and previews on the settings pages. Pyrefly and debugpy ship in the plugin; the interpreter, pytest, uv,
-> conda and Ruff stay your own. Pick the interpreter on Settings › Build, Execution, Deployment › Toolchains.
+> conda and Ruff stay your own. Pick the interpreter from the drop-down at the top of Settings › Languages & Frameworks › Python.
 
-> **兼容性**：需要 Lithe 桌面端 0.8.9 或更新版本；0.8.10 起还能按 shebang 识别没有后缀的 Python 脚本。
+> **兼容性**：1.2.0 需要 0.8.14 之后发布的 Lithe 桌面端（包含 [#2312](https://github.com/1lck/Lithe-IDEA/pull/2312) 和
+> [#2316](https://github.com/1lck/Lithe-IDEA/issues/2316) 的版本），旧版本不能安装，请继续用 1.1.0（支持 0.8.9 或更新版本）。
 > 各版本的变化见 [docs/releases](docs/releases)。
 
 ## 功能
@@ -18,7 +19,7 @@ Pyrefly 和 debugpy 随插件包分发，Python 解释器、pytest、uv、conda�
 | 功能 | 说明 |
 | --- | --- |
 | 代码智能 | 补全、自动导入、跳转定义、悬停、类型诊断，由随包的 [Pyrefly](https://github.com/facebook/pyrefly) 1.4.1 提供 |
-| 识别文件 | `.py`、`.pyi`、`.pyw`；0.8.10 起首行是 Python shebang 的无后缀脚本也按 Python 打开 |
+| 识别文件 | `.py`、`.pyi`、`.pyw`；首行是 Python shebang 的无后缀脚本也按 Python 打开 |
 | 运行 | 工具栏「当前文件」运行带 `if __name__ == "__main__"` 的脚本和包里的 `__main__.py`；构建窗口列出 `[project.scripts]`、Django `manage.py`、FastAPI、Flask 等入口；「运行/调试配置 → ＋ → Python」可以手动配置脚本或模块 |
 | 测试 | `pytest --collect-only` 收集函数、类方法、参数化用例和 doctest，组成测试树；可以运行整个套件或单个用例 |
 | 依赖 | 构建窗口的「依赖」列出所选解释器里已安装的包、版本和依赖关系，不需要 pip |
@@ -26,7 +27,7 @@ Pyrefly 和 debugpy 随插件包分发，Python 解释器、pytest、uv、conda�
 | 调试 | 随包的 debugpy 1.8.22，支持启动和按地址附加（`host`、`port`、`pathMappings`） |
 | 输出链接 | 终端和运行输出里 Traceback 的 `File "…", line N` 可以点击跳到源码 |
 | 新建项目 | 选解释器、选是否用 venv 或 uv 建 `.venv`、是否加示例代码；创建后项目固定使用所选解释器 |
-| 工具链 | 找到项目的 `.venv` 和电脑上 uv、pyenv、conda、python.org 装的 Python，按 `.python-version` 和 `requires-python` 选版本，见下文“Python 解释器” |
+| 工具链 | 找到项目的 `.venv`，Poetry、Pipenv、Hatch、virtualenvwrapper 建在项目外的环境，以及电脑上 uv、pyenv、conda、Homebrew、python.org 装的 Python；按 `.python-version` 和 `requires-python` 选版本，见下文“Python 解释器” |
 | 设置预览 | 语言页和构建工具页画出设置的效果和解释器的查找顺序，见下文“设置预览” |
 
 ## 设置
@@ -48,30 +49,22 @@ Pyrefly 和 debugpy 随插件包分发，Python 解释器、pytest、uv、conda�
 Pyrefly 分析代码、运行、测试、调试、读取依赖、安装依赖都用同一个解释器，除非设置了“Python 解释器覆盖路径”：那时构建任务、运行和
 pytest 用覆盖路径，Pyrefly 和调试仍用下面找到的解释器。Lithe 按这个顺序找：
 
-1. **项目环境**：为项目固定的解释器；项目里的 `.venv`、`venv`、`.conda`（项目要先被信任）；项目的 `.python-version` 和
-   `pyproject.toml` 的 `requires-python` 决定选哪个版本。
+1. **项目环境**：为项目固定的解释器；项目里的 `.venv`、`venv`、`.conda`（项目要先被信任）；有 `poetry.lock` 或 `Pipfile` 时，
+   Poetry、Pipenv 为这个项目建的环境；项目的 `.python-version` 和 `pyproject.toml` 的 `requires-python` 决定选哪个版本。
 2. **全局默认**：全局固定的解释器，其次默认版本。
-3. **自动发现**：`VIRTUAL_ENV`，`PATH` 里的 `python3`、`python`，然后是 uv、pyenv、conda、python.org 装的 Python。
+3. **自动发现**：`VIRTUAL_ENV`，`PATH` 里的 `python3`、`python`，然后是 uv、pyenv、conda、Homebrew、python.org 装的 Python。
 
-换解释器在 **设置 → 构建、执行、部署 → 工具链**：为项目或全局固定一个找到的安装，或者添加其他目录。
-「语言与框架 › Python」顶部那一行显示当前用的解释器，点它也会到工具链页。
+`.python-version` 写版本号（如 `3.12`）和 `requires-python` 只选基础解释器，不会选中别的项目的虚拟环境；
+`.python-version` 写的是环境名（pyenv-virtualenv 的做法）时，选同名的环境。
 
-**目前用不了的解释器**（[#2316](https://github.com/1lck/Lithe-IDEA/issues/2316)）：在 macOS 和 Linux 上，Lithe 拒绝程序链接到安装目录外的
-Python，固定也不行。受影响的有：
-
-- 建在项目外的虚拟环境：`python -m venv`、`uv venv`、virtualenv 建的，以及 Poetry、Pipenv、virtualenvwrapper 默认建的环境；
-- Homebrew 的 Python，它不会出现在安装列表里。
-
-在此之前请把环境建在项目里：`python3 -m venv .venv` 或 `uv venv`；Poetry 先运行 `poetry config virtualenvs.in-project true`，
-Pipenv 设置 `PIPENV_VENV_IN_PROJECT=1`。也可以固定 uv、pyenv、python.org 装的基础解释器，但那里没有环境里装的包。
-
-项目外的环境暂时也可以填进“Python 解释器覆盖路径”，让运行和 pytest 先用上它。
+换解释器：点「语言与框架 › Python」顶部那一行，在下拉菜单里为项目或全局选一个找到的解释器，或者添加其他目录，
+例如建在别处的 `python -m venv`、`uv venv` 环境。菜单底部也能打开 **设置 → 构建、执行、部署 → 工具链**。
 
 ## 设置预览
 
 两块预览由插件后端按界面语言、外观和设置窗口宽度画出。它们用示例代码，不读取打开的项目；截图里的路径和版本是测试数据。
 
-**语言与框架 › Python**：顶部是当前用的 Python 解释器；设置了覆盖路径时，下面多一行说明哪些流程改用它。下面四张卡片各对应一项设置：
+**语言与框架 › Python**：顶部是当前用的 Python 解释器，点它打开下拉菜单换解释器；设置了覆盖路径时，下面多一行说明哪些流程改用它。下面四张卡片各对应一项设置：
 
 | 卡片 | 画出什么 |
 | --- | --- |
@@ -86,7 +79,7 @@ Pipenv 设置 `PIPENV_VENV_IN_PROJECT=1`。也可以固定 uv、pyenv、python.o
 
 <img src="docs/assets/settings-previews/language-en-draft-light.png" alt="还没应用的修改先显示在预览里，英文浅色外观" width="720">
 
-**构建工具 › Python**：先画覆盖路径（有没有设置、设置后谁用它），再画上面三步查找顺序，以及查找到的解释器用在哪些流程。这一页没有设置项，换解释器要到工具链页。
+**构建工具 › Python**：顶部同样是解释器下拉菜单；下面先画覆盖路径（有没有设置、设置后谁用它），再画上面三步查找顺序，以及查找到的解释器用在哪些流程。这一页没有其他设置项。
 
 <img src="docs/assets/settings-previews/build-tools-zh-Hans-dark.png" alt="构建工具 › Python 画出 Lithe 查找 Python 解释器的顺序，深色外观" width="720">
 
@@ -113,7 +106,9 @@ Pipenv 设置 `PIPENV_VENV_IN_PROJECT=1`。也可以固定 uv、pyenv、python.o
 
 - 后端用 [Rust 插件 SDK](https://github.com/Lithe-IDEA/Lithe-core-rust/tree/main/shared/plugins/sdk/rust) 编写，回答
   `pyrefly.resolveLaunch`（启动 Pyrefly 并传入所选解释器）、`settings.view`（两块设置预览）和 `toolchains/query`（读取 conda 登记、uv、pyenv、
-  Poetry、Pipenv 环境和项目的版本要求）。后端不保存状态，也不写文件。
+  Poetry、Pipenv、Hatch、virtualenvwrapper 环境和项目的版本要求）。后端不保存状态，也不写文件。
+- 虚拟环境的 `bin/python` 通常链接到基础安装。`plugin.json` 的 python 工具定义写了 `executableLinksOutsideHome`，
+  Lithe 按环境里的路径启动它，Python 因此能找到自己所在的环境和装在里面的包。
 - 构建提供者 `scripts/build_provider.py` 由所选解释器以 `python -I -B` 启动，回答 `lithe/build/model`、`test`、`runEntrypoints` 和 `prepareRun`。
   它只用 `ast` 和 `tomllib` 读项目，不执行项目代码。
 - 测试树由 `test.discoveryCommand` 运行 `scripts/discover_tests.py` 得到；报告和 pytest 缓存在 Lithe 分配的目录里，用完由 Lithe 清理。
@@ -158,16 +153,16 @@ PYTEST_PYTHON=/path/to/python node scripts/test.mjs          # 用真实的 Pyre
 需要 Node.js 22+、Go、Rust 工具链、`git` 和两个 Python：
 
 - `PATH` 里的 `python3` 要是 3.10 或更新（调试用的 debugpy 需要），并且能用 `--copies` 建虚拟环境。Homebrew（`/opt/homebrew/opt/python@3.x/libexec/bin`）或 python.org 装的都可以；uv 装的独立版本复制出来不能运行，Xcode 自带的是 3.9；
-- `PYTEST_PYTHON` 指向装了 pytest 的真实安装，不能是虚拟环境（固定解释器的测试会固定它，见 #2316）。例如
-  `uv python install 3.12 --install-dir .artifacts/test-python`，再用 `uv pip install --python <它的 python3.12> --break-system-packages pytest`。
+- `PYTEST_PYTHON` 指向装了 pytest 的真实安装，不能是虚拟环境：`RunCurrentFilePinnedInterpreter` 固定它，
+  `RunCurrentFilePinnedEnvironment` 另用 `python3` 在项目外建虚拟环境来固定。例如 `uv python install 3.12 --install-dir .artifacts/test-python`，
+  再用 `uv pip install --python <它的 python3.12> --break-system-packages pytest`。
 
 ```bash
 node scripts/package.mjs --platform darwin-arm64
-export LITHE_TEST_PYTHON_PLUGIN_ARCHIVE="$PWD/dist/python-support-1.1.0-darwin-arm64.zip"
+export LITHE_TEST_PYTHON_PLUGIN_ARCHIVE="$PWD/dist/python-support-1.2.0-darwin-arm64.zip"
 PYTEST_PYTHON=/path/to/python3.12 node scripts/e2e-host.mjs
-# 用同一个包检查 0.8.9：高亮、当前文件运行、固定解释器、手动运行
-PYTEST_PYTHON=/path/to/python3.12 node scripts/e2e-host.mjs --ref desktop-v0.8.9 \
-  --run '^TestPythonSupportPlugin(GrammarHighlighting|RunCurrentFile(InterpreterOverride|PinnedInterpreter)?|ManualRunAndDependencies)$'
+# 只跑固定解释器的两个用例
+PYTEST_PYTHON=/path/to/python3.12 node scripts/e2e-host.mjs --run '^TestPythonSupportPluginRunCurrentFilePinned'
 ```
 
 插件包路径要写绝对路径。脚本把宿主检出到 `.artifacts/lithe-host`，复制 `e2e/host/desktop/` 下的测试后运行；`--source`、`--ref`、`--run`
@@ -181,9 +176,9 @@ PYTEST_PYTHON=/path/to/python3.12 node scripts/e2e-host.mjs --ref desktop-v0.8.9
 
 1. 修改 `io.github.lithe-idea.python-support/plugin.json` 的 `version`：修复升修订号，加功能升次版本号，特别大的革新才升主版本号。
    依赖还没发布的宿主能力时照样升次版本号，作为预发布版本发布。写好 `docs/releases/v<版本>.md`，合入 `main`。
-2. 推送同名标签，例如 `git tag v1.1.0 && git push origin v1.1.0`。
+2. 推送同名标签，例如 `git tag v1.2.0 && git push origin v1.2.0`。
 3. `Release` 工作流核对标签与版本，打六个平台的包并发布 Release，说明里附 SHA-256 和 `docs/releases/v<版本>.md`。
-   `release.yml` 的 `PRERELEASE_TAGS` 里的版本标为预发布，目前是 `v0.1.0` 和 `v0.1.1`。
+   `release.yml` 的 `PRERELEASE_TAGS` 里的版本标为预发布，目前是 `v0.1.0`、`v0.1.1` 和 `v1.2.0`。
 4. Lithe Store 的自动追踪会为稳定版本开合并请求，合并后用户即可更新。
 
 ## 许可

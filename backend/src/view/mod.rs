@@ -73,7 +73,7 @@ fn render(event: &ViewEvent) -> Result<(Vec<Value>, u64), PluginError> {
         PYTHON_REGION => {
             let settings = Settings::read(event);
             let nodes = vec![
-                json!({ "type": "tool", "tool": PYTHON_TOOL }),
+                json!({ "type": "tool", "tool": PYTHON_TOOL, "choose": true }),
                 resolution::canvas(words, settings.interpreter_override.as_deref(), event.width),
             ];
             Ok((nodes, settings.unrecognized))
@@ -517,6 +517,7 @@ mod tests {
             .iter()
             .map(|row| {
                 assert_eq!(row["type"], "tool");
+                assert_eq!(row["choose"], true, "the row is the interpreter picker");
                 row["tool"].as_str().unwrap()
             })
             .collect();
@@ -525,7 +526,10 @@ mod tests {
 
         let python = nodes(PYTHON_REGION, "en", json!({}), json!({}));
         assert_eq!(python.len(), 2);
-        assert_eq!(python[0], json!({ "type": "tool", "tool": "python" }));
+        assert_eq!(
+            python[0],
+            json!({ "type": "tool", "tool": "python", "choose": true })
+        );
         assert_eq!(canvas(&python)["id"], resolution::CANVAS_ID);
     }
 

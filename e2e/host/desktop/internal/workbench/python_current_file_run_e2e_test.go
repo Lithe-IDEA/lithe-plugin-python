@@ -27,6 +27,10 @@ const (
 	projectEnvironment pythonRunInterpreter = iota
 	// An installation pinned for the project, as the Toolchains page does.
 	pinnedInstallation
+	// A virtual environment outside the project, pinned for the project. Its
+	// python links to the interpreter it was made from, outside the
+	// environment, so Lithe must start it from the environment's own path.
+	pinnedEnvironment
 	// The Python executable override setting, which build, run and pytest
 	// use before the lookup.
 	executableOverride
@@ -41,6 +45,13 @@ func TestPythonSupportPluginRunCurrentFile(t *testing.T) {
 // run to use it over the project's .venv.
 func TestPythonSupportPluginRunCurrentFilePinnedInterpreter(t *testing.T) {
 	checkPythonCurrentFileRun(t, pinnedInstallation)
+}
+
+// TestPythonSupportPluginRunCurrentFilePinnedEnvironment pins a virtual
+// environment made outside the project and expects the run to happen inside
+// it: sys.prefix is the environment, not the interpreter it links to.
+func TestPythonSupportPluginRunCurrentFilePinnedEnvironment(t *testing.T) {
+	checkPythonCurrentFileRun(t, pinnedEnvironment)
 }
 
 // TestPythonSupportPluginRunCurrentFileInterpreterOverride sets the Python
@@ -120,8 +131,14 @@ func checkPythonCurrentFileRun(t *testing.T, interpreter pythonRunInterpreter) {
 	})
 	installPythonArchive(t, ctx, h.app.plugins, archive)
 	h.app.reloadPluginLanguages()
-	if interpreter == pinnedInstallation {
+	switch interpreter {
+	case pinnedInstallation:
 		home, version := pythonInstallationForE2E(t, ctx, cmp.Or(os.Getenv("PYTEST_PYTHON"), python))
+		wantPrefix = home
+		addPythonInstallationForE2E(t, ctx, h, home)
+		pinPythonForE2E(t, ctx, kernel, root, home, version)
+	case pinnedEnvironment:
+		home, version := externalPythonEnvironmentForE2E(t, ctx, python)
 		wantPrefix = home
 		addPythonInstallationForE2E(t, ctx, h, home)
 		pinPythonForE2E(t, ctx, kernel, root, home, version)

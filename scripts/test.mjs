@@ -23,6 +23,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -461,6 +462,11 @@ try {
 
       const pyTool = variant.toolDefinitions[0];
       assert.equal("pathPrepend" in pyTool, false, "toolDefinitions[0] must omit unsafe pathPrepend");
+      assert.equal(
+        pyTool.executableLinksOutsideHome,
+        true,
+        "A venv's program links to its base interpreter outside the environment",
+      );
       assert.equal(pyTool.discovery.length, 16, "discovery rules must fit Core limit of 16");
       const envVars = pyTool.discovery
         .filter((d) => d.root.kind === "environment")
@@ -733,7 +739,7 @@ try {
       const opened = await peer.waitFor((m) => m.id === 21, "Python preview open");
       const [interpreterSection, wide] = opened.result.view;
       assert.equal(interpreterSection.type, "section");
-      assert.deepEqual(interpreterSection.children, [{ type: "tool", tool: "python" }]);
+      assert.deepEqual(interpreterSection.children, [{ type: "tool", tool: "python", choose: true }]);
       assert.deepEqual(wide.on, ["resize"]);
       assert.equal(wide.viewBox[2], 640);
       assert.match(JSON.stringify(wide), /"text":"bad-argument-type"\},\{"color":"\$textSecondary","text":" · 2 errors"/);
@@ -771,7 +777,7 @@ try {
       });
       const lookedUp = await peer.waitFor((m) => m.id === 23, "Python lookup order open");
       const [toolRow, order] = lookedUp.result.view;
-      assert.deepEqual(toolRow, { type: "tool", tool: "python" });
+      assert.deepEqual(toolRow, { type: "tool", tool: "python", choose: true });
       assert.equal(order.id, "python-resolution");
       assert.equal(order.on, undefined);
       assert.match(JSON.stringify(order), /Python executable override[\s\S]*Not set[\s\S]*Tried first[\s\S]*Global default[\s\S]*Tried last[\s\S]*Pyrefly uses the interpreter found/);
@@ -1092,7 +1098,7 @@ try {
     }
   });
 
-  await check("The packaged provider answers toolchains/query for conda, uv, pyenv, Poetry, Pipenv, .python-version, and pyproject.toml", async () => {
+  await check("The packaged provider answers toolchains/query for conda, uv, pyenv, Poetry, Pipenv, Hatch, linked venvs, .python-version, and pyproject.toml", async () => {
     const fakeHome = join(scratch, "fake-home");
     const condaEnvDir = join(scratch, "conda-envs", "ml-311");
     const uvPyDir = join(scratch, "uv-pythons", "cpython-3.12.6-macos-aarch64-none");
@@ -1103,7 +1109,11 @@ try {
     // Workspace-local .venv MUST be excluded from provider installations per toolchains contract!
     const wsLocalVenv = join(wsRoot, ".venv");
 
-    const makeFakePythonHome = (dir, ver, isConda = false) => {
+    // A conda environment records its Python in conda-meta, a venv in
+    // pyvenv.cfg; a base installation from uv or pyenv has neither and is
+    // known by its directory name.
+    const makeFakePythonHome = (dir, ver, kind = "venv") => {
+      const isConda = kind === "conda";
       const binDir = process.platform === "win32" ? (isConda ? dir : join(dir, "Scripts")) : join(dir, "bin");
       mkdirSync(binDir, { recursive: true });
       const exeName = process.platform === "win32" ? "python.exe" : "python3";
@@ -1116,15 +1126,15 @@ try {
           join(dir, "conda-meta", `python-${ver}-0.json`),
           JSON.stringify({ name: "python", version: ver }),
         );
-      } else {
+      } else if (kind === "venv") {
         writeFileSync(join(dir, "pyvenv.cfg"), `version_info = ${ver}\n`);
       }
     };
 
-    makeFakePythonHome(condaEnvDir, "3.11.9", true);
-    makeFakePythonHome(uvPyDir, "3.12.6", false);
-    makeFakePythonHome(pyenvVerDir, "3.10.14", false);
-    makeFakePythonHome(wsLocalVenv, "3.12.1", false);
+    makeFakePythonHome(condaEnvDir, "3.11.9", "conda");
+    makeFakePythonHome(uvPyDir, "3.12.6", "base");
+    makeFakePythonHome(pyenvVerDir, "3.10.14", "base");
+    makeFakePythonHome(wsLocalVenv, "3.12.1");
 
     mkdirSync(join(fakeHome, ".conda"), { recursive: true });
     const condaRegistry = join(fakeHome, ".conda", "environments.txt");
@@ -1147,6 +1157,19 @@ try {
     const poetryProjectPath = process.platform === "win32" ? workspaceDirectory.toLowerCase() : workspaceDirectory;
     const poetryDir = join(poetryRoot, `tc-demo-${workspaceHash(poetryProjectPath)}-py3.12`);
     makeFakePythonHome(poetryDir, "3.12.1");
+    // Hatch nests environments as <project name>/<project ID>/<environment>.
+    const hatchData = join(scratch, "hatch-data");
+    const hatchEnvDir = join(hatchData, "env", "virtual", "tc-demo", "Ab12Cd34", "test");
+    makeFakePythonHome(hatchEnvDir, "3.12.4");
+    makeFakePythonHome(join(hatchData, "env", "virtual", ".pythons", "3.12"), "3.12.4");
+    // A venv outside the project whose program links to its base interpreter,
+    // as `python -m venv` makes on macOS and Linux. Windows copies the program.
+    const linkedVenvDir = join(workonRoot, "linked");
+    if (process.platform !== "win32") {
+      mkdirSync(join(linkedVenvDir, "bin"), { recursive: true });
+      symlinkSync(join(uvPyDir, "bin", "python3"), join(linkedVenvDir, "bin", "python3"));
+      writeFileSync(join(linkedVenvDir, "pyvenv.cfg"), "version_info = 3.12.6\n");
+    }
 
     const discoveryEnv = {
       HOME: fakeHome,
@@ -1156,6 +1179,7 @@ try {
       PYENV_ROOT: join(scratch, "pyenv-root"),
       WORKON_HOME: workonRoot,
       POETRY_VIRTUALENVS_PATH: poetryRoot,
+      HATCH_DATA_DIR: hatchData,
       CONDA_ENVS_PATH: "",
       CONDA_PREFIX: "",
     };
@@ -1229,6 +1253,15 @@ try {
       assert.ok(homes.includes(expectedPath(pyenvVerDir)), "Expected PYENV_ROOT installation");
       assert.ok(homes.includes(expectedPath(pipenvDir)), "Expected WORKON_HOME Pipenv installation");
       assert.ok(homes.includes(expectedPath(poetryDir)), "Expected configured Poetry installation");
+      assert.ok(homes.includes(expectedPath(hatchEnvDir)), "Expected nested Hatch installation");
+      assert.equal(
+        reply.result.installations.some((installation) => pathKey(installation.home).includes(`${sep}.pythons${sep}`)),
+        false,
+        "Hatch's hidden interpreter store is not an environment",
+      );
+      if (process.platform !== "win32") {
+        assert.ok(homes.includes(expectedPath(linkedVenvDir)), "Expected a venv whose program links outside it");
+      }
       assert.ok(watch.includes(expectedPath(join(wsRoot, "poetry.lock"))));
       assert.equal(homes.includes(expectedPath(wsLocalVenv)), false, "Must NEVER return workspace-local .venv");
 
@@ -1249,6 +1282,8 @@ try {
         assert.ok(watch.includes(expectedPath(watched)));
       }
 
+      // The linked venv is 3.12.6 too; a version pin still means the base
+      // interpreter, so the two do not tie.
       writeFileSync(versionPath, "3.12\n");
       const [compatible] = declarations(await queryProject(6, "tc-op-compatible"));
       assert.equal(pathKey(compatible.source), expectedPath(versionPath));
@@ -1614,7 +1649,6 @@ try {
         `open(${JSON.stringify(outsideCanary)}, "w").write("pwned")\ndef test_evil():\n    assert True\n`,
       );
       if (process.platform !== "win32") {
-        const { symlinkSync } = await import("node:fs");
         symlinkSync(outsidePy, join(wsDir, "tests", "test_escape_link.py"));
       }
 
