@@ -62,7 +62,7 @@ jobs:
     needs: [check, package]
     if: needs.check.outputs.exists == 'false'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -79,6 +79,9 @@ jobs:
         env:
           LITHE_EXPECT_ALL_ARCHIVES: "1"
         run: node --test --test-timeout=60000 scripts/package/*.test.mjs
+      - name: Set up optional delta generation
+        continue-on-error: true
+        run: command -v zstd || sudo apt-get install -y zstd
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -93,6 +96,19 @@ jobs:
               break
             fi
           done
+          if (( ${#release_flags[@]} == 0 )); then
+            if curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+                --max-time 20 --max-filesize 5242880 \
+                -o "$RUNNER_TEMP/store-index.json" \
+                https://raw.githubusercontent.com/Lithe-IDEA/Lithe-store/HEAD/lithe-plugin-index.json &&
+                bash scripts/package/release-deltas.sh "$RUNNER_TEMP/store-index.json" dist "${GITHUB_REF_NAME#v}"; then
+              echo "Checked for optional plugin deltas."
+            else
+              echo "::warning::Could not prepare optional patches; publishing full ZIPs."
+            fi
+          fi
+          shopt -s nullglob
+          patches=(dist/*.zip.zst)
           notes="docs/releases/$GITHUB_REF_NAME.md"
           test -s "$notes"
           {
@@ -122,4 +138,4 @@ jobs:
             echo "::error::Release tag $GITHUB_REF_NAME no longer points to the packaged commit. Use the run for the current tag."
             exit 1
           fi
-          gh release create "$GITHUB_REF_NAME" dist/*.zip --verify-tag --title "Python Support $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" "${release_flags[@]}"
+          gh release create "$GITHUB_REF_NAME" dist/*.zip "${patches[@]}" --verify-tag --title "Python Support $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" "${release_flags[@]}"

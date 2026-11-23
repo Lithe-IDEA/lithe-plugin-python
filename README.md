@@ -177,7 +177,7 @@ PYTEST_PYTHON=/path/to/python3.12 node scripts/e2e-host.mjs --run '^TestPythonSu
 1. 修改 `io.github.lithe-idea.python-support/plugin.json` 的 `version`：修复升修订号，加功能升次版本号，特别大的革新才升主版本号。
    依赖还没发布的宿主能力时照样升次版本号，作为预发布版本发布。写好 `docs/releases/v<版本>.md`，合入 `main`。
 2. 推送同名标签，例如 `git tag v1.2.0 && git push origin v1.2.0`。
-3. `Release` 工作流核对标签与版本，打六个平台的包并发布 Release，说明里附 SHA-256 和 `docs/releases/v<版本>.md`。
+3. `Release` 工作流核对标签与版本，打六个平台的包并发布 Release，说明里附 SHA-256 和 `docs/releases/v<版本>.md`。 正式发布还会对照 Lithe Store 的上一个同平台版本生成可选增量包。校验成功、且补丁最多为完整包的 75% 时才随 Release 发布。
    `release.yml` 的 `PRERELEASE_TAGS` 里的版本标为预发布，目前是 `v0.1.0`、`v0.1.1` 和 `v1.2.0`。
 4. Lithe Store 的自动追踪会为稳定版本开合并请求，合并后用户即可更新。
 
