@@ -2,7 +2,7 @@
   "schemaVersion": 0,
   "id": "io.github.lithe-idea.python-support",
   "displayName": "Python Support",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "vendor": {
     "id": "io.github.lithe-idea",
     "displayName": "Lithe Community",
