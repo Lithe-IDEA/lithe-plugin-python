@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +10,10 @@ const publishStep = workflow.match(/^ {6}- name: Publish GitHub Release\n(?: {8}
 assert.ok(publishStep, "Could not find the release workflow's publish step");
 const publishScript = publishStep[1].replace(/^ {10}/gm, "");
 const recordReleaseArgs = 'gh() { printf "%s\\n" "$@" > "$RELEASE_ARGS"; }\n';
+const serveStoreIndex = `curl() {
+  [[ "\${!#}" == https://raw.githubusercontent.com/Lithe-IDEA/Lithe-store/HEAD/lithe-plugin-index.json ]] || return 1
+  printf '{"plugins":[]}\\n' > "\${@: -2:1}"
+}\n`;
 
 const gitEnv = {
   PATH: process.env.PATH,
@@ -44,6 +48,11 @@ function releaseFixture(t, tag = "v1.0.0", tagOptions = []) {
 
   mkdirSync(join(checkout, "docs", "releases"), { recursive: true });
   mkdirSync(join(checkout, "dist"));
+  mkdirSync(join(checkout, "scripts", "package"), { recursive: true });
+  copyFileSync(
+    new URL("../../package/release-deltas.sh", import.meta.url),
+    join(checkout, "scripts", "package", "release-deltas.sh"),
+  );
   writeFileSync(join(checkout, "docs", "releases", `${tag}.md`), "Release notes\n");
   writeFileSync(join(checkout, "dist", "python-support.zip"), "Test archive contents\n");
 
@@ -58,7 +67,7 @@ function releaseFixture(t, tag = "v1.0.0", tagOptions = []) {
       git(checkout, "push", "-q", "origin", `:${ref}`);
     },
     publish() {
-      const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", recordReleaseArgs + publishScript], {
+      const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", recordReleaseArgs + serveStoreIndex + publishScript], {
         cwd: checkout,
         encoding: "utf8",
         timeout: 5000,
@@ -81,6 +90,7 @@ test("publish uses the unchanged lightweight release tag", (t) => {
   const fixture = releaseFixture(t);
   const result = fixture.publish();
   assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /Checked for optional plugin deltas/);
   const args = readFileSync(fixture.cliLog, "utf8").trimEnd().split("\n");
   assert.deepEqual(args.slice(0, 3), ["release", "create", "v1.0.0"]);
   assert.ok(args.includes("--verify-tag"));
