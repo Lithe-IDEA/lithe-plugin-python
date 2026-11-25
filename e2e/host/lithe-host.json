@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/1lck/Lithe-IDEA.git",
-  "revision": "58b527edc46345d7c623c3bddd9db80d609ebf06",
+  "revision": "26b691995b6f2898baa2243b1692512f456b7304",
   "packages": {
     "./internal/projectgen": "^TestPythonPlugin",
     "./internal/settingswindow": "^TestPythonPluginSettingsPreview$",

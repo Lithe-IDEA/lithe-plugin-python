@@ -57,6 +57,13 @@ export function manifestForPlatform(baseManifest, platform, lock) {
   const isWindows = platform.startsWith("windows-");
   clone.backend.launch.path = backendPath(platform);
 
+  // Task arguments have no plugin-directory variable. Keep the task body in
+  // a Python source file and embed it as an argv element during packaging.
+  const conda = clone.buildSystems.find(({ id }) => id === "conda");
+  const envUpdate = conda.tasks.find(({ id }) => id === "env-update");
+  const condaProgram = readFileSync(join(ROOT, "scripts", "package", "conda_env_update.py"), "utf8");
+  envUpdate.arguments = envUpdate.arguments.map((arg) => arg === "@conda-env-update@" ? condaProgram : arg);
+
   for (const server of clone.languageServers ?? []) {
     if (server.languageID === "python" && server.launch?.kind === "packaged") {
       server.launch.path = platformSpec.packagePath;

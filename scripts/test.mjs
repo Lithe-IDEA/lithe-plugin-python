@@ -313,6 +313,47 @@ try {
   const dependencyArguments = (outputFile) => dependencyCommand.arguments.map((arg) =>
     arg.replace("${pluginDir}", unpackedPluginDir).replace("${outputFile}", outputFile));
 
+  await check("Conda task selects the existing environment file and passes through arguments", () => {
+    const task = pluginManifest.buildSystems.find(({ id }) => id === "conda").tasks[0];
+    const [isolated, noBytecode, execute, script] = task.arguments;
+    const workspace = join(scratch, "conda workspace");
+    mkdirSync(workspace);
+    run(pythonCmd, [isolated, noBytecode, execute, `
+import os
+import subprocess
+import sys
+from pathlib import Path
+from types import ModuleType
+from unittest.mock import Mock, patch
+
+task = ModuleType("conda_env_update")
+exec(compile(sys.argv[1], "conda_env_update.py", "exec"), task.__dict__)
+conda = Path.cwd() / "conda install" / "bin" / "conda"
+if os.name == "nt":
+    conda = Path.cwd() / "conda install" / "condabin" / "conda.bat"
+    executable = conda.parent.parent / "Scripts" / "conda.exe"
+else:
+    executable = conda
+os.environ["LITHE_CONDA_PATH"] = str(conda)
+sys.argv = ["conda_env_update.py", "--name", "test environment"]
+for files, selected in [((), "environment.yml"), (("environment.yaml",), "environment.yaml"),
+                        (("environment.yml", "environment.yaml"), "environment.yml")]:
+    for name in ("environment.yml", "environment.yaml"):
+        Path(name).unlink(missing_ok=True)
+    for name in files:
+        Path(name).write_text("name: test\\n", encoding="utf-8")
+    expected = [str(executable), "env", "update", "--file", selected, "--prune", "--name", "test environment"]
+    if os.name == "nt":
+        with patch.object(task.subprocess, "run", return_value=Mock(returncode=17)) as invoke:
+            assert task.main() == 17
+            invoke.assert_called_once_with(expected, check=False, creationflags=subprocess.CREATE_NO_WINDOW)
+    else:
+        with patch.object(task.os, "execv") as invoke:
+            task.main()
+            invoke.assert_called_once_with(executable, expected)
+`, script], { cwd: workspace });
+  });
+
   await check("dependency command skips user-site startup hooks", () => {
     const environment = join(scratch, "dependency environment with shared site");
     run(pythonCmd, ["-I", "-B", "-m", "venv", "--without-pip", "--system-site-packages", environment]);

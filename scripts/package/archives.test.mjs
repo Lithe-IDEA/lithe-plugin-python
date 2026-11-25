@@ -27,6 +27,26 @@ test("every platform shows the settings views and the interpreter override on th
   }
 });
 
+test("Ruff requires its own configuration and prefers project executables to PATH", () => {
+  for (const platform of Object.keys(lock.pyrefly.platforms)) {
+    const manifest = manifestForPlatform(baseManifest, platform, lock);
+    const ruff = manifest.buildSystems.find(({ id }) => id === "ruff");
+    assert.deepEqual(ruff.detection.markers, ["ruff.toml", ".ruff.toml"]);
+    const host = platform.startsWith("windows-") ? "windows" : platform.startsWith("darwin-") ? "macos" : "linux";
+    const windows = host === "windows";
+    const venvBinary = windows ? "Scripts/ruff.exe" : "bin/ruff";
+    const condaBinaries = windows ? ["Library/bin/ruff.exe", "Scripts/ruff.exe"] : ["bin/ruff"];
+    const projectFile = (path, marker) => ({ kind: "projectFile", path, requires: [marker] });
+    const candidates = ruff.invocation.executables.filter(({ platforms }) => !platforms || platforms.includes(host));
+    assert.deepEqual(candidates.map(({ platforms, ...candidate }) => candidate), [
+      projectFile(`.venv/${venvBinary}`, ".venv/pyvenv.cfg"),
+      projectFile(`venv/${venvBinary}`, "venv/pyvenv.cfg"),
+      ...condaBinaries.map((binary) => projectFile(`.conda/${binary}`, ".conda/conda-meta/history")),
+      { kind: "command", command: "ruff" },
+    ], platform);
+  }
+});
+
 function checkBackendArchitecture(bytes, platform) {
   const arm = platform.endsWith("-arm64");
   if (platform.startsWith("windows-")) {

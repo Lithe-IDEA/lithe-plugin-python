@@ -822,26 +822,34 @@
       },
       "invocation": {
         "executables": [
-          { "kind": "command", "command": "conda" }
+          { "kind": "command", "command": "python3", "platforms": ["macos", "linux"] },
+          { "kind": "command", "command": "python" },
+          { "kind": "toolchain", "toolchainID": "python" }
         ],
-        "version": {
-          "arguments": ["--version"],
-          "pattern": "conda (\\d+(?:\\.\\d+)*)"
-        }
+        "runtimeDependencies": [
+          {
+            "id": "conda",
+            "displayName": "Conda",
+            "executables": [{ "kind": "command", "command": "conda" }],
+            "version": {
+              "arguments": ["--version"],
+              "pattern": "conda (\\d+(?:\\.\\d+)*)"
+            }
+          }
+        ]
       },
       "tasks": [
         {
           "id": "env-update",
           "displayName": "conda env update",
-          "description": "Update the Conda environment from environment.yml and prune removed packages.",
+          "description": "Update the Conda environment from environment.yml or environment.yaml and prune removed packages.",
           "group": "build",
           "scopes": ["workspace", "project"],
           "arguments": [
-            "env",
-            "update",
-            "--file",
-            "environment.yml",
-            "--prune",
+            "-I",
+            "-B",
+            "-c",
+            "@conda-env-update@",
             "${optionArguments}",
             "${userArguments}"
           ]
@@ -855,10 +863,17 @@
       "id": "ruff",
       "displayName": "Ruff",
       "detection": {
-        "markers": ["ruff.toml", ".ruff.toml", "pyproject.toml"]
+        "markers": ["ruff.toml", ".ruff.toml"]
       },
       "invocation": {
         "executables": [
+          { "kind": "projectFile", "path": ".venv/bin/ruff", "requires": [".venv/pyvenv.cfg"], "platforms": ["macos", "linux"] },
+          { "kind": "projectFile", "path": ".venv/Scripts/ruff.exe", "requires": [".venv/pyvenv.cfg"], "platforms": ["windows"] },
+          { "kind": "projectFile", "path": "venv/bin/ruff", "requires": ["venv/pyvenv.cfg"], "platforms": ["macos", "linux"] },
+          { "kind": "projectFile", "path": "venv/Scripts/ruff.exe", "requires": ["venv/pyvenv.cfg"], "platforms": ["windows"] },
+          { "kind": "projectFile", "path": ".conda/bin/ruff", "requires": [".conda/conda-meta/history"], "platforms": ["macos", "linux"] },
+          { "kind": "projectFile", "path": ".conda/Library/bin/ruff.exe", "requires": [".conda/conda-meta/history"], "platforms": ["windows"] },
+          { "kind": "projectFile", "path": ".conda/Scripts/ruff.exe", "requires": [".conda/conda-meta/history"], "platforms": ["windows"] },
           { "kind": "command", "command": "ruff" }
         ],
         "version": {
@@ -909,7 +924,7 @@
         ]
       },
       "sync": {
-        "watch": ["ruff.toml", ".ruff.toml", "pyproject.toml"]
+        "watch": ["ruff.toml", ".ruff.toml"]
       }
     }
   ],
