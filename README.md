@@ -23,7 +23,7 @@ Pyrefly 和 debugpy 随插件包分发，Python 解释器、pytest、uv、conda�
 | 运行 | 工具栏「当前文件」运行带 `if __name__ == "__main__"` 的脚本和包里的 `__main__.py`；构建窗口列出 `[project.scripts]`、Django `manage.py`、FastAPI、Flask 等入口；「运行/调试配置 → ＋ → Python」可以手动配置脚本或模块 |
 | 测试 | `pytest --collect-only` 收集函数、类方法、参数化用例和 doctest，组成测试树；可以运行整个套件或单个用例 |
 | 依赖 | 构建窗口的「依赖」列出所选解释器里已安装的包、版本和依赖关系，不需要 pip |
-| 任务 | `pip install -r requirements.txt`、`mypy`；有 `uv.lock` 时 `uv sync`、`uv lock`；有 `environment.yml` 时 `conda env update`；有 Ruff 配置时 `ruff check`、`ruff format` |
+| 任务 | `pip install -r requirements.txt`、`mypy`；有 `uv.lock` 时 `uv sync`、`uv lock`；有 `environment.yml` 或 `environment.yaml` 时 `conda env update`（两者都有时使用 `environment.yml`）；有 `ruff.toml` 或 `.ruff.toml` 时 `ruff check`、`ruff format`，优先使用项目虚拟环境里的 Ruff |
 | 调试 | 随包的 debugpy 1.8.22，支持启动和按地址附加（`host`、`port`、`pathMappings`） |
 | 输出链接 | 终端和运行输出里 Traceback 的 `File "…", line N` 可以点击跳到源码 |
 | 新建项目 | 选解释器、选是否用 venv 或 uv 建 `.venv`、是否加示例代码；创建后项目固定使用所选解释器 |
@@ -90,7 +90,8 @@ pytest 用覆盖路径，Pyrefly 和调试仍用下面找到的解释器。Lithe
 | Python 3.9 或更新，调试要 3.10 或更新 | 运行、测试、调试、依赖、读取项目 | 你电脑上的，见上文“Python 解释器” |
 | pytest | 测试树和运行测试 | 装在项目用的解释器里 |
 | mypy | `mypy` 任务 | 装在项目用的解释器里 |
-| uv、conda、ruff | 对应的任务 | `PATH` |
+| uv、conda | 对应的任务 | `PATH`。Conda 任务使用 `PATH` 或 Python 工具链中可运行的 Python 3.9+ 选择环境文件。 |
+| Ruff | Ruff 检查与格式化任务 | 项目的 `.venv`、`venv`、`.conda`，然后是 `PATH` |
 | Pyrefly 1.4.1 | 代码智能 | 随插件包 |
 | debugpy 1.8.22 | 调试 | 随插件包，由项目用的解释器运行，需要 Python 3.10 或更新 |
 
@@ -144,6 +145,7 @@ PYTEST_PYTHON=/path/to/python node scripts/test.mjs          # 用真实的 Pyre
 （默认 `python3`）。`PYTHON` 要是 3.10 或更新，调试流程要用它建的虚拟环境运行 debugpy。`plugin.json` 的格式见 Rust Core 仓库的
 [插件契约](https://github.com/Lithe-IDEA/Lithe-core-rust/blob/main/shared/plugins/contract/v1/README.md)和
 [构建工具接入指南](https://github.com/Lithe-IDEA/Lithe-core-rust/blob/main/shared/plugins/guides/build-tool-integration.md)。
+打包时把 `scripts/package/conda_env_update.py` 嵌入 Conda 任务的命令参数。脚本只在用户执行任务时读取工作目录里的环境文件。
 
 ## 宿主端到端测试
 

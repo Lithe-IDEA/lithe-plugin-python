@@ -333,6 +333,101 @@ func installPythonArchive(t *testing.T, ctx context.Context, service *pluginserv
 	return installed.Path
 }
 
+func TestPythonSupportPluginStandaloneBuildPlans(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	kernel := core.NewClient()
+	service, err := pluginservice.Open(kernel, store.At(t.TempDir()), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed := installPythonArchive(t, ctx, service, pythonArchiveForE2E(t))
+	rawManifest, err := os.ReadFile(filepath.Join(installed, "plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := pluginhost.Validate(ctx, kernel, rawManifest, pluginhost.Declared())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	write := func(name, contents string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(workspace, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	detect := func(want ...string) {
+		t.Helper()
+		detection, err := kernel.DetectBuildSystems(ctx, workspace, []json.RawMessage{manifest})
+		if err != nil || len(detection.Rejected) != 0 {
+			t.Fatalf("detect build systems: %+v, %v", detection.Rejected, err)
+		}
+		ids := make([]string, 0, len(detection.Instances))
+		for _, instance := range detection.Instances {
+			ids = append(ids, instance.BuildSystemID)
+		}
+		slices.Sort(ids)
+		if !slices.Equal(ids, want) {
+			t.Fatalf("detected systems = %v, want %v", ids, want)
+		}
+	}
+	write("pyproject.toml", "[project]\nname = 'plain'\nversion = '0.1.0'\n")
+	write("uv.lock", "version = 1\n")
+	detect("python", "uv")
+	write("environment.yml", "name: fixture\n")
+	detect("conda", "python", "uv")
+
+	for _, marker := range []string{"ruff.toml", ".ruff.toml"} {
+		write(marker, "line-length = 100\n")
+		detect("conda", "python", "ruff", "uv")
+		if err := os.Remove(filepath.Join(workspace, marker)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, system := range []struct {
+		id    string
+		tasks []string
+	}{
+		{"uv", []string{"lock", "sync"}},
+		{"conda", []string{"env-update"}},
+		{"ruff", []string{"check", "format"}},
+	} {
+		tree, err := kernel.BuildModelTree(ctx, manifest, system.id, core.BuildModelTreeRequest{})
+		if err != nil {
+			t.Fatalf("%s task tree: %v", system.id, err)
+		}
+		var ids []string
+		for _, group := range tree.Nodes {
+			for _, node := range group.Children {
+				if node.Kind == core.BuildTreeTask && node.ProjectID == "" && node.TargetID == "" {
+					ids = append(ids, node.TaskID)
+				}
+			}
+		}
+		slices.Sort(ids)
+		if !slices.Equal(ids, system.tasks) {
+			t.Errorf("%s workspace tasks = %v, want %v", system.id, ids, system.tasks)
+		}
+	}
+
+	invocation, err := kernel.PlanBuildInvocation(ctx, manifest, "ruff", core.BuildInvocationRequest{
+		Root: "nested", Platform: "macos",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invocation.Executables) == 0 {
+		t.Fatal("Ruff invocation has no executable candidates")
+	}
+	first := invocation.Executables[0]
+	if first.Kind != "projectFile" || first.Path != "nested/.venv/bin/ruff" ||
+		!slices.Equal(first.Requires, []string{"nested/.venv/pyvenv.cfg"}) {
+		t.Fatalf("first Ruff candidate = %+v, want project-local Ruff with its environment marker", first)
+	}
+}
+
 func TestPythonSupportPluginContractPlansInstallAndImmutability(t *testing.T) {
 	archive := pythonArchiveForE2E(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
