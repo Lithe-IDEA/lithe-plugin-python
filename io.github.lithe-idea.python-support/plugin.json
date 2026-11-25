@@ -826,6 +826,11 @@
           { "kind": "command", "command": "python" },
           { "kind": "toolchain", "toolchainID": "python" }
         ],
+        "minimumVersion": "3.9",
+        "version": {
+          "arguments": ["--version"],
+          "pattern": "Python (\\d+(?:\\.\\d+)*)"
+        },
         "runtimeDependencies": [
           {
             "id": "conda",
@@ -848,6 +853,7 @@
           "arguments": [
             "-I",
             "-B",
+            "-S",
             "-c",
             "@conda-env-update@",
             "${optionArguments}",

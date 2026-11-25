@@ -90,7 +90,7 @@ pytest 用覆盖路径，Pyrefly 和调试仍用下面找到的解释器。Lithe
 | Python 3.9 或更新，调试要 3.10 或更新 | 运行、测试、调试、依赖、读取项目 | 你电脑上的，见上文“Python 解释器” |
 | pytest | 测试树和运行测试 | 装在项目用的解释器里 |
 | mypy | `mypy` 任务 | 装在项目用的解释器里 |
-| uv、conda | 对应的任务 | `PATH`。Conda 任务使用 `PATH` 或 Python 工具链中的解释器选择环境文件。 |
+| uv、conda | 对应的任务 | `PATH`。Conda 任务使用 `PATH` 或 Python 工具链中可运行的 Python 3.9+ 选择环境文件。 |
 | Ruff | Ruff 检查与格式化任务 | 项目的 `.venv`、`venv`、`.conda`，然后是 `PATH` |
 | Pyrefly 1.4.1 | 代码智能 | 随插件包 |
 | debugpy 1.8.22 | 调试 | 随插件包，由项目用的解释器运行，需要 Python 3.10 或更新 |

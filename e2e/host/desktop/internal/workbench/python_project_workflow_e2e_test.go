@@ -55,6 +55,17 @@ func TestPythonSupportPluginStandaloneBuildPanel(t *testing.T) {
 			runConda := runtime.GOOS != "windows" && len(scenario.tasks["conda"]) != 0
 			if runConda {
 				tools := t.TempDir()
+				python, err := exec.LookPath("python3")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(python, filepath.Join(tools, "python")); err != nil {
+					t.Fatal(err)
+				}
+				// Some systems expose a launcher on PATH even without a Python runtime behind it.
+				if err := os.WriteFile(filepath.Join(tools, "python3"), []byte("#!/bin/sh\nexit 29\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
 				const conda = "#!/bin/sh\n[ \"$#\" = 5 ] && [ \"$*\" = 'env update --file environment.yaml --prune' ] && [ -f \"$4\" ]\n"
 				if err := os.WriteFile(filepath.Join(tools, "conda"), []byte(conda), 0o700); err != nil {
 					t.Fatal(err)

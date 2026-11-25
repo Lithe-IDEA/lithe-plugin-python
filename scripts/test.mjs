@@ -315,10 +315,10 @@ try {
 
   await check("Conda task selects the existing environment file and passes through arguments", () => {
     const task = pluginManifest.buildSystems.find(({ id }) => id === "conda").tasks[0];
-    const [isolated, noBytecode, execute, script] = task.arguments;
+    const [isolated, noBytecode, noSite, execute, script] = task.arguments;
     const workspace = join(scratch, "conda workspace");
     mkdirSync(workspace);
-    run(pythonCmd, [isolated, noBytecode, execute, `
+    run(pythonCmd, [isolated, noBytecode, noSite, execute, `
 import os
 import subprocess
 import sys
